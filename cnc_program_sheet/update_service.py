@@ -128,12 +128,16 @@ def download_verified_installer(update: UpdateInfo) -> Path:
     # The uploaded GitHub asset can have a transliterated filename while the
     # signed manifest uses the Windows installer name.  Follow the manifest:
     # it is the authority used for checksum verification.
-    installer = destination_dir / _installer_name_from_manifest(checksum_file)
+    manifest_installer_name = _installer_name_from_manifest(checksum_file)
+    # cmd.exe is used to launch the installer only after the GUI exits.  Keep
+    # that handoff path ASCII-only: the legacy Windows console code page can
+    # corrupt Chinese characters and then report a false “file not found”.
+    installer = destination_dir / "installer.exe"
     _download(update.installer_url, installer)
     expected: str | None = None
     for line in checksum_file.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[-1].lstrip("*") == installer.name:
+        if len(parts) >= 2 and parts[-1].lstrip("*") == manifest_installer_name:
             expected = parts[0].lower()
             break
     actual = hashlib.sha256(installer.read_bytes()).hexdigest().lower()

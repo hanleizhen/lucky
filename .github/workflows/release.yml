@@ -45,7 +45,10 @@ jobs:
         shell: pwsh
         run: |
           $installer = Get-ChildItem build/installer/*_Setup_x64.exe | Select-Object -First 1
-          $publishedName = "CNC程序单自动生成工具_${{ steps.app_version.outputs.version }}_Setup_x64.exe"
+          # ASCII is intentional: the updater's cmd.exe handoff must work on
+          # every Windows system locale, including systems without a Chinese
+          # console code page.
+          $publishedName = "CNCProgramSheet_${{ steps.app_version.outputs.version }}_Setup_x64.exe"
           $publishedInstaller = Join-Path $installer.DirectoryName $publishedName
           Move-Item -LiteralPath $installer.FullName -Destination $publishedInstaller -Force
           $hash = (Get-FileHash $publishedInstaller -Algorithm SHA256).Hash.ToLower()
