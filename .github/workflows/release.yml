@@ -1,0 +1,61 @@
+name: Build and publish release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements.txt
+      - name: Check version tag and expose version
+        id: app_version
+        shell: pwsh
+        run: |
+          $version = python -c "from cnc_program_sheet.version import __version__; print(__version__)"
+          if ($env:GITHUB_REF_NAME.TrimStart('v') -ne $version) { throw "Git tag must be v$version" }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Configure release update source
+        run: python scripts/set_release_repository.py $env:GITHUB_REPOSITORY
+      - name: Build windowed application
+        shell: pwsh
+        run: |
+          # Keep unrelated runner DLLs out of PyInstaller's dependency scan.
+          $pythonDir = Split-Path (Get-Command python).Source
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$pythonDir"
+          python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work cnc_program_sheet.spec
+      - name: Build setup installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.app_version.outputs.version }}" installer.iss
+      - name: Create SHA-256 manifest
+        id: installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem build/installer/*_Setup_x64.exe | Select-Object -First 1
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash *$($installer.Name)" | Set-Content build/installer/SHA256SUMS.txt -NoNewline
+          "path=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CNC程序单自动生成工具-v${{ steps.app_version.outputs.version }}
+          path: build/installer/*
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "v${{ steps.app_version.outputs.version }}" "${{ steps.installer.outputs.path }}" "build/installer/SHA256SUMS.txt" --title "v${{ steps.app_version.outputs.version }}" --generate-notes
