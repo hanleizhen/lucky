@@ -28,7 +28,9 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="CNC程序单自动生成工具",
+    # Keep the installed executable path ASCII-only so cmd.exe can safely
+    # launch it after a background update on every Windows locale.
+    name="CNCProgramSheet",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -43,5 +45,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="CNC程序单自动生成工具",
+    name="CNCProgramSheet",
 )

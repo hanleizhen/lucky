@@ -5,7 +5,7 @@
 #endif
 
 #define MyAppName "CNC程序单自动生成工具"
-#define MyAppExeName "CNC程序单自动生成工具.exe"
+#define MyAppExeName "CNCProgramSheet.exe"
 
 [Setup]
 AppId={{912FB6C9-AECD-49B5-811C-557A3231CF33}
@@ -26,14 +26,11 @@ RestartApplications=no
 UninstallDisplayName={#MyAppName}
 
 [Files]
-Source: "build\dist\CNC程序单自动生成工具\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "build\dist\CNCProgramSheet\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-
-[Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项："; Flags: unchecked
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Dirs]
 ; This directory is owned by the user. The app creates settings, templates,
@@ -41,4 +38,6 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Name: "{localappdata}\CNCProgramSheet"; Flags: uninsneveruninstall
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; The updater uses /VERYSILENT. Launch the new version at the end so a user
+; who started with a portable Desktop EXE is switched to the installed build.
+Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait
