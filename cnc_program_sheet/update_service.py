@@ -27,6 +27,7 @@ class UpdateError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class UpdateInfo:
     version: str
+    installer_name: str
     installer_url: str
     checksum_url: str
     release_url: str
@@ -77,8 +78,12 @@ def check_latest(repository: str) -> UpdateInfo | None:
     )
     if not installer or not checksum:
         raise UpdateError("最新 Release 缺少安装包或 SHA256SUMS.txt，已拒绝升级。")
+    installer_name = str(installer.get("name", "")).strip()
+    if not installer_name or Path(installer_name).name != installer_name:
+        raise UpdateError("最新 Release 的安装包文件名无效，已拒绝升级。")
     return UpdateInfo(
         version=version,
+        installer_name=installer_name,
         installer_url=str(installer["browser_download_url"]),
         checksum_url=str(checksum["browser_download_url"]),
         release_url=str(release.get("html_url", "")),
@@ -103,7 +108,10 @@ def download_verified_installer(update: UpdateInfo) -> Path:
     destination_dir = updates_dir() / f"v{update.version}"
     destination_dir.mkdir(parents=True, exist_ok=True)
     checksum_file = destination_dir / "SHA256SUMS.txt"
-    installer = destination_dir / f"{APP_NAME}_{update.version}_Setup_x64.exe"
+    # Preserve the filename published with the Release.  Inno Setup may
+    # transliterate a Unicode display name, so constructing a Chinese name
+    # locally can never match the filename recorded in SHA256SUMS.txt.
+    installer = destination_dir / update.installer_name
     _download(update.checksum_url, checksum_file)
     _download(update.installer_url, installer)
     expected: str | None = None
