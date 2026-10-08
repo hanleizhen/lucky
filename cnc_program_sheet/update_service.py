@@ -102,17 +102,33 @@ def _download(url: str, target: Path) -> None:
         raise UpdateError(f"下载更新失败：{exc}") from exc
 
 
+def _installer_name_from_manifest(checksum_file: Path) -> str:
+    """Return the single safe setup filename declared by SHA256SUMS.txt."""
+
+    names: list[str] = []
+    for line in checksum_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[-1].lstrip("*")
+        if name.lower().endswith("_setup_x64.exe") and Path(name).name == name:
+            names.append(name)
+    if len(names) != 1:
+        raise UpdateError("Release 的 SHA256SUMS.txt 缺少唯一的安装包文件名，已拒绝升级。")
+    return names[0]
+
+
 def download_verified_installer(update: UpdateInfo) -> Path:
     """Fetch installer and require an SHA-256 listed in the same published Release."""
 
     destination_dir = updates_dir() / f"v{update.version}"
     destination_dir.mkdir(parents=True, exist_ok=True)
     checksum_file = destination_dir / "SHA256SUMS.txt"
-    # Preserve the filename published with the Release.  Inno Setup may
-    # transliterate a Unicode display name, so constructing a Chinese name
-    # locally can never match the filename recorded in SHA256SUMS.txt.
-    installer = destination_dir / update.installer_name
     _download(update.checksum_url, checksum_file)
+    # The uploaded GitHub asset can have a transliterated filename while the
+    # signed manifest uses the Windows installer name.  Follow the manifest:
+    # it is the authority used for checksum verification.
+    installer = destination_dir / _installer_name_from_manifest(checksum_file)
     _download(update.installer_url, installer)
     expected: str | None = None
     for line in checksum_file.read_text(encoding="utf-8", errors="replace").splitlines():
