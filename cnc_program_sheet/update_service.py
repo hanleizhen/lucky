@@ -15,6 +15,11 @@ from .app_paths import updates_dir
 from .version import APP_NAME, __version__
 
 
+# HTTP header values must be Latin-1/ASCII encodable.  APP_NAME is deliberately
+# Chinese for the Windows UI, so it must never be sent verbatim as User-Agent.
+HTTP_USER_AGENT = f"CNCProgramSheet/{__version__}"
+
+
 class UpdateError(RuntimeError):
     pass
 
@@ -44,7 +49,7 @@ def is_newer(candidate: str, current: str = __version__) -> bool:
 def _json_request(url: str) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": f"{APP_NAME}/{__version__}"},
+        headers={"Accept": "application/vnd.github+json", "User-Agent": HTTP_USER_AGENT},
     )
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
@@ -82,7 +87,7 @@ def check_latest(repository: str) -> UpdateInfo | None:
 
 
 def _download(url: str, target: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{__version__}"})
+    request = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=30) as response, target.open("wb") as handle:
             while chunk := response.read(1024 * 1024):
