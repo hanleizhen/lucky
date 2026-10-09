@@ -55,6 +55,43 @@ def user_images_dir() -> Path:
     return path
 
 
+def pasted_nc_programs_dir() -> Path:
+    """Return the user-owned cache for NC source copied as clipboard text.
+
+    Clipboard text disappears as soon as another item is copied. Keeping a
+    private source copy means the normal parser, reparse action and export
+    flow can treat pasted NC exactly like a file dropped from Explorer. This
+    directory lives beside templates and images in LocalAppData, never inside
+    the application installation, so upgrades cannot remove it.
+    """
+
+    path = user_data_dir() / "pasted_nc"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def cache_pasted_nc_program(text: str, filename: str) -> Path:
+    """Persist pasted NC text and return a source path with its display name.
+
+    A content-addressed subdirectory lets two different programs with the
+    same header coexist while keeping the final file name (for example
+    ``O0788.NC``) accurate in the program sheet.
+    """
+
+    if not text or not text.strip():
+        raise ValueError("剪贴板中的 NC 程序为空")
+    proposed = Path(filename).name or "Clipboard-NC.NC"
+    safe_stem = "".join(character if character.isalnum() or character in "-_" else "_" for character in Path(proposed).stem)
+    safe_name = f"{safe_stem or 'Clipboard-NC'}.NC"
+    encoded = text.encode("utf-8")
+    target_dir = pasted_nc_programs_dir() / sha256(encoded).hexdigest()[:16]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / safe_name
+    if not target.exists():
+        target.write_bytes(encoded)
+    return target
+
+
 def copy_user_image(source: str | Path) -> Path:
     """Keep an inserted image available even if its original file is moved.
 

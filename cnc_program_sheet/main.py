@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QIODevice, QPoint, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_paths import (
+    cache_pasted_nc_program,
     cache_user_image_bytes,
     copy_user_image,
     default_user_template,
@@ -87,6 +88,47 @@ def natural_program_sort_key(name: str) -> tuple[object, ...]:
     """Sort program names as an operator expects: O-2 before O-10."""
 
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name.casefold()))
+
+
+def clipboard_nc_paths(mime_data: Any) -> list[Path]:
+    """Extract copied NC files from Windows Explorer clipboard data."""
+
+    return [
+        Path(url.toLocalFile())
+        for url in mime_data.urls()
+        if url.isLocalFile() and is_supported_nc_file(Path(url.toLocalFile()))
+    ]
+
+
+def is_nc_program_text(text: str) -> bool:
+    """Conservatively distinguish copied NC code from ordinary cell text."""
+
+    if not text or not text.strip():
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    header_found = any(re.match(r"^\(?\s*O(?:[-_A-Z]*\d)[A-Z0-9_-]*\b", line, re.IGNORECASE) for line in lines)
+    command_count = sum(
+        bool(re.search(r"(?<![A-Z])(?:G\d{1,3}|M\d{1,3}|T\d+)(?!\d)", line, re.IGNORECASE))
+        for line in lines
+    )
+    coordinate_found = any(
+        re.search(r"(?<![A-Z])[XYZ]\s*[+-]?(?:\d+\.?\d*|\.\d+)", line, re.IGNORECASE) for line in lines
+    )
+    # A full copied program normally has an O-number plus command lines. A
+    # selected block is still valid when it has multiple NC commands or a
+    # motion command with an axis value.
+    return (header_found and command_count >= 1) or command_count >= 2 or (command_count >= 1 and coordinate_found)
+
+
+def clipboard_nc_filename(text: str) -> str:
+    """Use the pasted program's O-number when one is present."""
+
+    match = re.search(r"(?im)^\s*\(?\s*(O(?:[-_A-Z]*\d)[A-Z0-9_-]*)\b", text)
+    if match:
+        return f"{match.group(1).upper()}.NC"
+    return "Clipboard-NC.NC"
 
 
 def is_supported_nc_file(path: Path) -> bool:
@@ -305,6 +347,7 @@ class ExcelPreview(QTableWidget):
     insert_blank_row_requested = Signal(int)
     remove_blank_row_requested = Signal(int)
     clipboard_image_paste_requested = Signal()
+    clipboard_nc_paste_requested = Signal()
     image_geometry_changed = Signal(str, str, int, int, int, int)
     image_delete_requested = Signal(str)
 
@@ -362,6 +405,10 @@ class ExcelPreview(QTableWidget):
             )
             if mime_data.hasImage() or image_file_in_clipboard:
                 self.clipboard_image_paste_requested.emit()
+                event.accept()
+                return
+            if clipboard_nc_paths(mime_data) or (mime_data.hasText() and is_nc_program_text(mime_data.text())):
+                self.clipboard_nc_paste_requested.emit()
                 event.accept()
                 return
         # Delete is intentionally reserved for removing an operator-inserted
@@ -765,7 +812,10 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(update_settings)
         layout.addLayout(toolbar)
 
-        self.drop_label = QLabel("将 NC 程序拖到这里\n支持一次导入多个 .NC / .nc 文件，将按程序名数字从小到大排列")
+        self.drop_label = QLabel(
+            "将 NC 程序拖到这里，或复制后在窗口按 Ctrl+V 粘贴\n"
+            "支持一次导入多个 .NC / .nc 文件及 NC 程序文本，将按程序名数字从小到大排列"
+        )
         self.drop_label.setObjectName("dropArea")
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_label.setMinimumHeight(95)
@@ -800,8 +850,14 @@ class MainWindow(QMainWindow):
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
         self.preview.clipboard_image_paste_requested.connect(self.paste_image_from_clipboard)
+        self.preview.clipboard_nc_paste_requested.connect(self.paste_nc_from_clipboard)
         self.preview.image_geometry_changed.connect(self._update_image_geometry)
         self.preview.image_delete_requested.connect(self._remove_image_by_id)
+        # Child widgets normally consume Ctrl+V themselves. Intercept it
+        # before an Excel/result cell can interpret copied NC code as plain
+        # text, while leaving ordinary text paste untouched for editing.
+        for widget in (self.file_list, self.result_table, self.preview):
+            widget.installEventFilter(self)
         right_layout.addWidget(self.preview)
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -944,6 +1000,51 @@ class MainWindow(QMainWindow):
             self._add_image_placement(cached_image, anchor, *self._default_image_size(cached_image))
         except Exception as exc:
             self.show_error("无法粘贴图片", str(exc))
+
+    def _clipboard_contains_nc_input(self) -> bool:
+        mime_data = QApplication.clipboard().mimeData()
+        return bool(clipboard_nc_paths(mime_data)) or (mime_data.hasText() and is_nc_program_text(mime_data.text()))
+
+    def paste_nc_from_clipboard(self) -> bool:
+        """Import Explorer-copied NC files or copied NC program text.
+
+        Text is first saved in the per-user data directory, then parsed using
+        the same code path as drag-and-drop. This keeps reparse available and
+        avoids depending on clipboard contents after they are replaced.
+        """
+
+        mime_data = QApplication.clipboard().mimeData()
+        paths = clipboard_nc_paths(mime_data)
+        if paths:
+            self.add_nc_files(paths)
+            self.statusBar().showMessage("已从剪贴板导入 NC 文件。", 4000)
+            return True
+        text = mime_data.text() if mime_data.hasText() else ""
+        if not is_nc_program_text(text):
+            return False
+        try:
+            cached_program = cache_pasted_nc_program(text, clipboard_nc_filename(text))
+            self.add_nc_files([cached_program])
+            self.statusBar().showMessage("已从剪贴板导入 NC 程序文本。", 4000)
+            return True
+        except Exception as exc:
+            self.show_error("无法粘贴 NC 程序", str(exc))
+            return True
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
+            if self._clipboard_contains_nc_input():
+                self.paste_nc_from_clipboard()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Paste) and self._clipboard_contains_nc_input():
+            self.paste_nc_from_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def remove_images_at_selected_cell(self) -> None:
         selected_id = self.preview.selected_image_id
