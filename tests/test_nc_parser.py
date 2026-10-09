@@ -254,6 +254,35 @@ M30
     )
 
 
+def test_decimal_t_style_header_writes_t_size_not_compensation_d() -> None:
+    """3011-B-74 convention: the second T word is the T-cutter size."""
+
+    record = parse_text(
+        """%
+O0000(3011-B-74)
+( T1 | T5.9 | H1 | D1 | WEAR COMP | TOOL DIA. - 5.9 | XY STOCK TO LEAVE - .02 | Z STOCK TO LEAVE - 0. )
+G21
+G0 G17 G40 G49 G80 G90
+G91 G28 Z0.
+T1 M6
+G0 G90 G54 X-98.263 Y-111.821 A0. S3500 M3
+G43 H1 Z20. M8
+Z-5.764
+G1 Z-5.964 F500.
+M30
+%""",
+        "3011-B-74.NC",
+    )
+
+    assert (record.tool_number, record.detected_tool_type, record.diameter, record.radius, record.depth) == (
+        "T1",
+        "T型刀",
+        "T5.9",
+        "",
+        "Z-5.964",
+    )
+
+
 def test_multi_tool_program_creates_one_record_per_m6_with_scoped_depth() -> None:
     records = parse_records_text(
         """%

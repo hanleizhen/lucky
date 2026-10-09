@@ -26,6 +26,10 @@ class TemplateError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class TemplateLayout:
     sheet_name: str = "Sheet1"
+    # The empty merged field at the top-right of the supplied template is the
+    # operator's job/program name.  It is also used as the exported workbook
+    # filename prefix when it has been filled in.
+    output_name_cell: str = "J1"
     # The supplied template labels G3 as DATE and uses J3 for its value.
     date_cell: str = "J3"
     first_program_row: int = 7
@@ -151,12 +155,34 @@ def cleared_program_cells() -> dict[str, str]:
     }
 
 
-def output_filename(records: Sequence[ProgramRecord], desktop: Path) -> Path:
-    stems = [re.sub(r'[<>:"/\\\\|?*]', "_", Path(record.program_name).stem) for record in records]
-    if stems and len(stems) <= 4:
-        base_name = "CNC程序单_" + "_".join(stems)
+def output_filename(
+    records: Sequence[ProgramRecord],
+    desktop: Path,
+    document_name: str = "",
+    generated_on: date | None = None,
+) -> Path:
+    """Return a unique output name without ever reusing an existing workbook.
+
+    A value entered in the template's J1 name field takes precedence and is
+    followed by the generation date.  Leaving that field blank retains the
+    original convenient NC-program based filename behaviour.
+    """
+
+    requested_name = document_name.strip()
+    # Operators sometimes type the extension out of habit.  The application
+    # always appends the one real .xlsx extension, so remove only that suffix.
+    if requested_name.lower().endswith(".xlsx"):
+        requested_name = requested_name[:-5].rstrip()
+    requested_name = re.sub(r'[<>:"/\\\\|?*]', "_", requested_name).strip(". ")
+    today = generated_on or date.today()
+    if requested_name:
+        base_name = f"{requested_name}_{today.isoformat()}"
     else:
-        base_name = f"CNC程序单_{date.today().isoformat()}"
+        stems = [re.sub(r'[<>:"/\\\\|?*]', "_", Path(record.program_name).stem) for record in records]
+        if stems and len(stems) <= 4:
+            base_name = "CNC程序单_" + "_".join(stems)
+        else:
+            base_name = f"CNC程序单_{today.isoformat()}"
     target = desktop / f"{base_name}.xlsx"
     number = 2
     while target.exists():

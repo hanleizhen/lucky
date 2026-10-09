@@ -57,6 +57,16 @@ T_SHAPE_TOOL_RE = re.compile(
     rf"(?<![A-Z0-9])T\s*(?P<diameter>{NUMBER_VALUE})\s*R\s*(?P<radius>{NUMBER_VALUE})(?![A-Z0-9])",
     re.I,
 )
+# Some supplied programs identify a T-type cutter with a decimal T size in
+# the tool-description header, e.g. ``( T1 | T5.9 | H1 | D1 | ... )``.  The
+# first T word is the controller tool number; the second is the actual cutter
+# designation that belongs in the template D column.  Requiring that explicit
+# two-column header form prevents an executable ``T1 M6`` tool change from
+# ever being treated as a cutter size.
+T_STYLE_HEADER_RE = re.compile(
+    rf"(?:\(\s*)?T\s*\d+\s*\|\s*T\s*(?P<diameter>{NUMBER_VALUE})(?=\s*(?:\||\)|H\s*\d|TOOL\b|$))",
+    re.I,
+)
 COMPACT_CHAMFER_RE = re.compile(
     rf"(?<![A-Z0-9])D\s*(?P<diameter>{NUMBER_VALUE})\s*C\s*(?P<angle>{NUMBER_VALUE})(?![A-Z0-9])",
     re.I,
@@ -206,6 +216,23 @@ def _find_t_shape_tool(evidence_lines: list[str]) -> tuple[tuple[str, str] | Non
     return (diameter, radius), False
 
 
+def _find_t_style_tool(evidence_lines: list[str]) -> tuple[str | None, bool]:
+    """Find a header-only decimal T-cutter size such as ``T5.9``.
+
+    This convention has no tool-radius declaration.  It is deliberately
+    separate from ``T6R0.4`` so R is never invented from the T value.
+    """
+
+    values = _unique_values(
+        [
+            _normalise_number(match.group("diameter"))
+            for line in evidence_lines
+            for match in T_STYLE_HEADER_RE.finditer(line)
+        ]
+    )
+    return (values[0], False) if len(values) == 1 else (None, len(values) > 1)
+
+
 def _find_chamfer(evidence_lines: list[str]) -> tuple[str | None, bool]:
     values: list[str] = []
     for line in evidence_lines:
@@ -293,6 +320,7 @@ def parse_text(text: str, filename: str, source_path: Path | None = None) -> Pro
         record.warnings.append("未找到明确刀具号")
 
     t_shape, t_shape_ambiguous = _find_t_shape_tool(evidence_lines)
+    t_style, t_style_ambiguous = _find_t_style_tool(evidence_lines)
     if t_shape:
         # Per the supplied program-sheet convention, T-type cutter sizes are
         # displayed in the D column as T6, T8, etc., not rewritten as D6/D8.
@@ -300,6 +328,14 @@ def parse_text(text: str, filename: str, source_path: Path | None = None) -> Pro
         diameter_ambiguous = radius_ambiguous = False
         record.diameter = f"T{diameter}"
         record.radius = f"R{radius}"
+    elif t_style:
+        # Header form: ``T1 | T5.9 | H1 | D1``.  T5.9 is the actual
+        # cutter specification; D1 is only the controller compensation word.
+        diameter = t_style
+        radius = None
+        diameter_ambiguous = radius_ambiguous = False
+        record.diameter = f"T{diameter}"
+        record.radius = ""
     else:
         diameter, diameter_ambiguous = _find_diameter(evidence_lines)
         # Keep the drawing/program convention requested for this template: D4,
@@ -307,9 +343,9 @@ def parse_text(text: str, filename: str, source_path: Path | None = None) -> Pro
         record.diameter = f"D{diameter}" if diameter else UNRECOGNIZED
         radius, radius_ambiguous = _find_radius(evidence_lines)
         record.radius = f"R{radius}" if radius else ""
-    if t_shape_ambiguous or diameter_ambiguous:
+    if t_shape_ambiguous or t_style_ambiguous or diameter_ambiguous:
         record.warnings.append("发现多个刀具直径，未自动填写 D")
-    elif not t_shape and not diameter:
+    elif not t_shape and not t_style and not diameter:
         record.warnings.append("未找到明确刀具直径")
     if t_shape_ambiguous or radius_ambiguous:
         record.warnings.append("发现多个刀具半径，未自动填写 R")
@@ -319,7 +355,7 @@ def parse_text(text: str, filename: str, source_path: Path | None = None) -> Pro
     detected_type = _tool_type(evidence_lines)
     # Recognise the program's tool kind internally. It is deliberately not
     # copied to the template's blank “区分” column.
-    if detected_type is None and t_shape:
+    if detected_type is None and (t_shape or t_style):
         detected_type = "T型刀"
     elif detected_type is None and chamfer:
         detected_type = "倒角刀"

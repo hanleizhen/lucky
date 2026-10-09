@@ -803,7 +803,10 @@ class SaveDirectoryDialog(QDialog):
         row.addWidget(browse)
         form = QFormLayout(self)
         form.addRow("固定保存文件夹：", row)
-        note = QLabel("首次保存后会记住此位置。以后每次点击“完成并保存”都会保存到这里；可随时用“保存位置”修改。")
+        note = QLabel(
+            "首次保存后会记住此位置。以后每次点击“完成并保存”都会保存到这里；"
+            "在模板顶部右侧空白名称框输入文字后，导出文件会使用“名称_日期.xlsx”。"
+        )
         note.setWordWrap(True)
         form.addRow(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -1686,7 +1689,11 @@ class MainWindow(QMainWindow):
         try:
             # Ensure table edits are applied even when a preview cell was never clicked.
             self.manual_cells.update(automatic_cells_for_rows(self.records))
-            target = output_filename([record for record in self.records if record is not None], output_directory)
+            target = output_filename(
+                [record for record in self.records if record is not None],
+                output_directory,
+                document_name=self.manual_cells.get(LAYOUT.output_name_cell, ""),
+            )
             export_workbook(
                 self.template_path,
                 target,
