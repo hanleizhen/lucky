@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .app_paths import updates_dir
 from .version import APP_NAME, __version__
@@ -21,6 +22,10 @@ from .version import APP_NAME, __version__
 # Chinese for the Windows UI, so it must never be sent verbatim as User-Agent.
 HTTP_USER_AGENT = f"CNCProgramSheet/{__version__}"
 TLS_SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1"
+# A fixed-name asset can be fetched through GitHub's public Release download
+# endpoint.  Unlike api.github.com it does not consume the shared anonymous
+# API request quota that office networks can exhaust very quickly.
+STABLE_UPDATE_MANIFEST = "CNCProgramSheet_update.json"
 
 
 class UpdateError(RuntimeError):
@@ -98,14 +103,36 @@ def _json_request(url: str) -> dict[str, Any]:
         raise UpdateError(f"无法连接 GitHub Release：{exc}") from exc
 
 
-def check_latest(repository: str) -> UpdateInfo | None:
-    repository = repository.strip().strip("/")
-    if not repository or repository.count("/") != 1:
-        raise UpdateError("请先在“设置更新源”中填写 GitHub 仓库，例如 owner/CNCProgramSheet。")
+def _manifest_update(repository: str, manifest: dict[str, Any]) -> UpdateInfo:
+    """Build a safe update record from the fixed public Release manifest.
+
+    The manifest carries only the version and installer name.  Every download
+    URL is then constructed from the repository entered by the operator, so a
+    malformed manifest cannot redirect the updater to an unrelated host.
+    """
+
+    version = str(manifest.get("version", "")).strip().lstrip("vV")
+    _version_tuple(version)
+    installer_name = str(manifest.get("installer_name", "")).strip()
+    if not installer_name or Path(installer_name).name != installer_name or not installer_name.lower().endswith("_setup_x64.exe"):
+        raise UpdateError("公开更新清单中的安装包文件名无效，已拒绝升级。")
+    release_base = f"https://github.com/{repository}/releases/download/v{quote(version)}"
+    return UpdateInfo(
+        version=version,
+        installer_name=installer_name,
+        installer_url=f"{release_base}/{quote(installer_name)}",
+        checksum_url=f"{release_base}/SHA256SUMS.txt",
+        release_url=f"https://github.com/{repository}/releases/tag/v{quote(version)}",
+        notes=str(manifest.get("notes", "")),
+    )
+
+
+def _api_latest(repository: str) -> UpdateInfo:
+    """Return latest metadata through the API for old releases without a manifest."""
+
     release = _json_request(f"https://api.github.com/repos/{repository}/releases/latest")
     version = str(release.get("tag_name", "")).lstrip("vV")
-    if not is_newer(version):
-        return None
+    _version_tuple(version)
     assets = release.get("assets") or []
     installer = next(
         (asset for asset in assets if str(asset.get("name", "")).lower().endswith("_setup_x64.exe")),
@@ -128,6 +155,31 @@ def check_latest(repository: str) -> UpdateInfo | None:
         release_url=str(release.get("html_url", "")),
         notes=str(release.get("body", "")),
     )
+
+
+def check_latest(repository: str) -> UpdateInfo | None:
+    repository = repository.strip().strip("/")
+    if not repository or repository.count("/") != 1:
+        raise UpdateError("请先在“设置更新源”中填写 GitHub 仓库，例如 owner/CNCProgramSheet。")
+    manifest_url = f"https://github.com/{repository}/releases/latest/download/{STABLE_UPDATE_MANIFEST}"
+    try:
+        update = _manifest_update(repository, _json_request(manifest_url))
+    except UpdateError as manifest_error:
+        # v1.1.14 and earlier did not publish the fixed manifest.  Keep the
+        # API fallback solely for those historical releases; all later normal
+        # checks use the public asset path above and avoid rate limits.
+        try:
+            update = _api_latest(repository)
+        except UpdateError as api_error:
+            if "rate limit exceeded" in str(api_error).lower():
+                raise UpdateError(
+                    "GitHub 当前限制了此网络的匿名更新查询。请稍后再试，或直接从发布页下载安装包。"
+                ) from api_error
+            raise UpdateError(f"公开更新清单和 GitHub Release 均无法访问：{api_error}") from api_error
+        # A successful fallback is expected while upgrading old release
+        # history; do not expose a harmless missing-manifest error to users.
+        _ = manifest_error
+    return update if is_newer(update.version) else None
 
 
 def _download(url: str, target: Path) -> None:

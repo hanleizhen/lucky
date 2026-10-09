@@ -53,6 +53,14 @@ jobs:
           Move-Item -LiteralPath $installer.FullName -Destination $publishedInstaller -Force
           $hash = (Get-FileHash $publishedInstaller -Algorithm SHA256).Hash.ToLower()
           "$hash *$publishedName" | Set-Content build/installer/SHA256SUMS.txt -NoNewline
+          # This fixed-name asset is read through GitHub's public
+          # releases/latest/download endpoint. It avoids api.github.com's
+          # shared anonymous rate limit for end-user update checks.
+          @{
+            version = "${{ steps.app_version.outputs.version }}"
+            installer_name = $publishedName
+            notes = ""
+          } | ConvertTo-Json -Compress | Set-Content build/installer/CNCProgramSheet_update.json -NoNewline -Encoding utf8
           "path=$publishedInstaller" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -64,7 +72,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "v${{ steps.app_version.outputs.version }}" "${{ steps.installer.outputs.path }}" "build/installer/SHA256SUMS.txt" --title "v${{ steps.app_version.outputs.version }}" --generate-notes
+          gh release create "v${{ steps.app_version.outputs.version }}" "${{ steps.installer.outputs.path }}" "build/installer/SHA256SUMS.txt" "build/installer/CNCProgramSheet_update.json" --title "v${{ steps.app_version.outputs.version }}" --generate-notes
       - name: Retain the three newest releases
         uses: actions/github-script@v8
         with:
