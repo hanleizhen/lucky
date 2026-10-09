@@ -16,13 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Keep the three newest releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          old_release_ids="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq 'map(select(.draft == false and .prerelease == false)) | sort_by(.published_at) | reverse | .[3:][] | .id')"
-          for release_id in ${old_release_ids}; do
-            echo "Deleting old GitHub Release ${release_id}"
-            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
-          done
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const normalReleases = releases
+              .filter((release) => !release.draft && !release.prerelease)
+              .sort((left, right) => new Date(right.published_at) - new Date(left.published_at));
+            for (const release of normalReleases.slice(3)) {
+              core.info(`Deleting old GitHub Release ${release.tag_name} (${release.id})`);
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+              });
+            }
