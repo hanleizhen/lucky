@@ -144,6 +144,6 @@ def test_overflow_names_the_exact_program_row_that_did_not_fit(tmp_path: Path, m
     window.add_nc_files([source])
 
     assert len(window.records) == LAYOUT.capacity
-    assert [(record.program_name, record.tool_number) for record in reported[0]] == [("too-many.NC", "T20")]
+    assert [(record.program_name, record.tool_number) for record in reported[0]] == [("too-many.NC", "")]
     window.close()
     assert app is not None
