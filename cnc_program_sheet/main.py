@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import traceback
 import xml.etree.ElementTree as ElementTree
@@ -80,6 +81,12 @@ RESULT_COLUMNS: list[tuple[str, str]] = [
 ]
 FIELD_NAMES = {field for _, field in RESULT_COLUMNS if field != "status"}
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+
+
+def natural_program_sort_key(name: str) -> tuple[object, ...]:
+    """Sort program names as an operator expects: O-2 before O-10."""
+
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name.casefold()))
 
 
 def is_supported_nc_file(path: Path) -> bool:
@@ -758,7 +765,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(update_settings)
         layout.addLayout(toolbar)
 
-        self.drop_label = QLabel("将 NC 程序拖到这里\n支持一次导入多个 .NC / .nc 文件，顺序将保持不变")
+        self.drop_label = QLabel("将 NC 程序拖到这里\n支持一次导入多个 .NC / .nc 文件，将按程序名数字从小到大排列")
         self.drop_label.setObjectName("dropArea")
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_label.setMinimumHeight(95)
@@ -788,6 +795,7 @@ class MainWindow(QMainWindow):
         self.template_label = QLabel("Excel 程序单预览")
         right_layout.addWidget(self.template_label)
         self.preview = ExcelPreview()
+        self.preview.setObjectName("excelPreview")
         self.preview.cell_edited.connect(self._on_preview_edited)
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
@@ -807,6 +815,9 @@ class MainWindow(QMainWindow):
             "#primaryButton { background: #0f6cbd; color: white; font-weight: 600; padding: 6px 15px; border-radius: 4px; }"
             "#primaryButton:hover { background: #005a9e; }"
             "QTableWidget { gridline-color: #d4dbe2; }"
+            "QTableWidget#excelPreview { gridline-color: #000000; border: 1px solid #000000; }"
+            "QTableWidget#excelPreview::item { border-right: 1px solid #000000; border-bottom: 1px solid #000000; }"
+            "QTableWidget#excelPreview QHeaderView::section { border: 1px solid #000000; }"
         )
 
     def _load_initial_template(self) -> None:
@@ -1103,9 +1114,10 @@ class MainWindow(QMainWindow):
         if not paths:
             self.show_error("未导入文件", "请拖入或选择至少一个 .NC / .nc 文件，或无扩展名的铜工 NC 程序。")
             return
+        paths.sort(key=lambda path: natural_program_sort_key(path.name))
         existing = {record.source_path.resolve() for record in self.records if record is not None}
         overflow_records: list[ProgramRecord] = []
-        for path in paths:  # Do not sort: Windows drop order is the program-sheet order.
+        for path in paths:
             if path.resolve() in existing:
                 continue
             try:
