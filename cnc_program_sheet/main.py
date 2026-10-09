@@ -9,8 +9,8 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPalette, QPixmap
+from PySide6.QtCore import QBuffer, QIODevice, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_paths import (
+    cache_user_image_bytes,
     copy_user_image,
     default_user_template,
     load_embedded_update_repository,
@@ -78,6 +79,7 @@ RESULT_COLUMNS: list[tuple[str, str]] = [
     ("解析状态", "status"),
 ]
 FIELD_NAMES = {field for _, field in RESULT_COLUMNS if field != "status"}
+IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 
 
 def is_supported_nc_file(path: Path) -> bool:
@@ -112,12 +114,17 @@ class ExcelPreview(QTableWidget):
     cell_edited = Signal(str, str)
     insert_blank_row_requested = Signal(int)
     remove_blank_row_requested = Signal(int)
+    clipboard_image_paste_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._loading = False
         self._theme_colors: list[str] = []
         self._image_marker_cells: set[str] = set()
+        # QTableWidget only contains an item at the top-left of an Excel
+        # merged range.  Keep the mapping for every covered preview cell so
+        # actions such as Ctrl+V still have a valid Excel anchor.
+        self._merged_cell_roots: dict[tuple[int, int], str] = {}
         # Excel cells with “no fill” are white. Do not inherit a dark Windows
         # palette that would make the template preview black.
         palette = self.palette()
@@ -150,6 +157,16 @@ class ExcelPreview(QTableWidget):
         menu.exec(self.viewport().mapToGlobal(position))
 
     def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Paste):
+            mime_data = QApplication.clipboard().mimeData()
+            image_file_in_clipboard = any(
+                url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_FILE_SUFFIXES
+                for url in mime_data.urls()
+            )
+            if mime_data.hasImage() or image_file_in_clipboard:
+                self.clipboard_image_paste_requested.emit()
+                event.accept()
+                return
         # Delete is intentionally reserved for removing an operator-inserted
         # blank program row. Individual values remain editable by double click.
         if event.key() == Qt.Key.Key_Delete and self._is_program_table_row(self.currentRow()):
@@ -252,6 +269,7 @@ class ExcelPreview(QTableWidget):
             self._loading = True
             self._theme_colors = self._theme_palette(workbook.loaded_theme)
             self._image_marker_cells.clear()
+            self._merged_cell_roots.clear()
             self.clear()
             self.setRowCount(sheet.max_row)
             self.setColumnCount(sheet.max_column)
@@ -293,6 +311,10 @@ class ExcelPreview(QTableWidget):
                     self.setItem(cell.row - 1, cell.column - 1, item)
             for merged in sheet.merged_cells.ranges:
                 self.setSpan(merged.min_row - 1, merged.min_col - 1, merged.max_row - merged.min_row + 1, merged.max_col - merged.min_col + 1)
+                root_coordinate = sheet.cell(merged.min_row, merged.min_col).coordinate
+                for row in range(merged.min_row - 1, merged.max_row):
+                    for column in range(merged.min_col - 1, merged.max_col):
+                        self._merged_cell_roots[(row, column)] = root_coordinate
         finally:
             self._loading = False
             workbook.close()
@@ -328,7 +350,9 @@ class ExcelPreview(QTableWidget):
             return None
         item = self.item(row, column)
         coordinate = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        return str(coordinate) if coordinate else None
+        if coordinate:
+            return str(coordinate)
+        return self._merged_cell_roots.get((row, column))
 
     def refresh_image_markers(self, placements: list[ImagePlacement]) -> None:
         """Show small image markers in the preview; export retains full size."""
@@ -396,7 +420,13 @@ class SettingsDialog(QDialog):
 class ImageInsertDialog(QDialog):
     """Choose the exported Excel size for an image anchored to one cell."""
 
-    def __init__(self, image_path: Path, anchor: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        image_path: Path,
+        anchor: str,
+        parent: QWidget | None = None,
+        source_label: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("插入图片")
         image = QImage(str(image_path))
@@ -416,7 +446,7 @@ class ImageInsertDialog(QDialog):
         self.height_input.valueChanged.connect(self._height_changed)
 
         layout = QFormLayout(self)
-        layout.addRow("图片：", QLabel(image_path.name))
+        layout.addRow("图片：", QLabel(source_label or image_path.name))
         layout.addRow("插入单元格：", QLabel(anchor))
         layout.addRow("宽度（像素）：", self.width_input)
         layout.addRow("高度（像素）：", self.height_input)
@@ -493,6 +523,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(template)
         insert_image = QPushButton("插入图片")
         insert_image.clicked.connect(self.insert_image)
+        insert_image.setToolTip("选择图片文件；也可在右侧预览选中单元格后按 Ctrl+V 粘贴截图或图片")
         toolbar.addWidget(insert_image)
         remove_image = QPushButton("删除图片")
         remove_image.clicked.connect(self.remove_images_at_selected_cell)
@@ -542,6 +573,7 @@ class MainWindow(QMainWindow):
         self.preview.cell_edited.connect(self._on_preview_edited)
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
+        self.preview.clipboard_image_paste_requested.connect(self.paste_image_from_clipboard)
         right_layout.addWidget(self.preview)
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -604,18 +636,66 @@ class MainWindow(QMainWindow):
             return
         try:
             image_path = Path(filename)
-            dialog = ImageInsertDialog(image_path, anchor, self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            size = self._choose_image_size(image_path, anchor)
+            if size is None:
                 return
-            width, height = dialog.image_size
             cached_image = copy_user_image(image_path)
-            self.image_placements.append(
-                ImagePlacement(source_path=cached_image, anchor=anchor, width=width, height=height)
-            )
-            self.preview.refresh_image_markers(self.image_placements)
-            self.statusBar().showMessage(f"已将图片插入到 {anchor}；导出 Excel 时会保留该图片。", 4500)
+            self._add_image_placement(cached_image, anchor, *size)
         except Exception as exc:
             self.show_error("无法插入图片", str(exc))
+
+    def _choose_image_size(
+        self,
+        image_path: Path,
+        anchor: str,
+        source_label: str | None = None,
+    ) -> tuple[int, int] | None:
+        dialog = ImageInsertDialog(image_path, anchor, self, source_label=source_label)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.image_size
+
+    def _add_image_placement(self, image_path: Path, anchor: str, width: int, height: int) -> None:
+        self.image_placements.append(
+            ImagePlacement(source_path=image_path, anchor=anchor, width=width, height=height)
+        )
+        self.preview.refresh_image_markers(self.image_placements)
+        self.statusBar().showMessage(f"已将图片插入到 {anchor}；导出 Excel 时会保留该图片。", 4500)
+
+    def paste_image_from_clipboard(self) -> None:
+        """Paste a screenshot, copied picture, or copied local image file."""
+
+        anchor = self.preview.current_coordinate()
+        if not anchor:
+            self.show_error("请选择粘贴位置", "请先在右侧 Excel 预览中点击一个单元格，再按 Ctrl+V。")
+            return
+        try:
+            mime_data = QApplication.clipboard().mimeData()
+            image = QApplication.clipboard().image()
+            if not image.isNull():
+                buffer = QBuffer()
+                if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not image.save(buffer, "PNG"):
+                    raise ValueError("无法读取剪贴板中的图片")
+                cached_image = cache_user_image_bytes(bytes(buffer.data()), "clipboard.png")
+                size = self._choose_image_size(cached_image, anchor, "剪贴板图片或截图")
+            else:
+                source = next(
+                    (
+                        Path(url.toLocalFile())
+                        for url in mime_data.urls()
+                        if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_FILE_SUFFIXES
+                    ),
+                    None,
+                )
+                if source is None:
+                    raise ValueError("剪贴板中没有可粘贴的图片或截图")
+                size = self._choose_image_size(source, anchor, f"剪贴板文件：{source.name}")
+                cached_image = copy_user_image(source)
+            if size is None:
+                return
+            self._add_image_placement(cached_image, anchor, *size)
+        except Exception as exc:
+            self.show_error("无法粘贴图片", str(exc))
 
     def remove_images_at_selected_cell(self) -> None:
         anchor = self.preview.current_coordinate()

@@ -70,6 +70,24 @@ def copy_user_image(source: str | Path) -> Path:
     return target
 
 
+def cache_user_image_bytes(data: bytes, filename: str = "clipboard.png") -> Path:
+    """Persist copied image data in the user-owned image cache.
+
+    Clipboard contents disappear when another item is copied.  Saving an
+    immutable PNG copy here makes pasted screenshots exportable later and
+    keeps them outside the application directory during upgrades.
+    """
+
+    if not data:
+        raise ValueError("剪贴板图片为空")
+    safe_name = Path(filename).name or "clipboard.png"
+    digest = sha256(data).hexdigest()[:16]
+    target = user_images_dir() / f"{digest}_{safe_name}"
+    if not target.exists():
+        target.write_bytes(data)
+    return target
+
+
 def config_path() -> Path:
     return user_data_dir() / "settings.json"
 
