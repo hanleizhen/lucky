@@ -7,7 +7,7 @@ from cnc_program_sheet.update_service import HTTP_USER_AGENT, UpdateInfo
 def test_update_user_agent_is_ascii_safe() -> None:
     """GitHub requests must not include the Chinese display name in headers."""
 
-    assert HTTP_USER_AGENT == "CNCProgramSheet/1.1.12"
+    assert HTTP_USER_AGENT == "CNCProgramSheet/1.1.13"
     assert HTTP_USER_AGENT.isascii()
     assert Request("https://api.github.com", headers={"User-Agent": HTTP_USER_AGENT})
 
@@ -36,3 +36,30 @@ def test_download_uses_the_manifest_filename_for_checksum_matching(tmp_path, mon
     )
 
     assert update_service.download_verified_installer(update).name == "installer.exe"
+
+
+def test_update_context_adds_windows_trusted_roots_without_disabling_tls(monkeypatch) -> None:
+    class FakeContext:
+        def __init__(self) -> None:
+            self.loaded: list[bytes] = []
+
+        def load_verify_locations(self, *, cadata: bytes) -> None:
+            self.loaded.append(cadata)
+
+    context = FakeContext()
+    monkeypatch.setattr(update_service.sys, "platform", "win32")
+    monkeypatch.setattr(update_service.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(
+        update_service.ssl,
+        "enum_certificates",
+        lambda store: [
+            (f"{store}-root".encode(), "x509_asn", True),
+            (b"server-only", "x509_asn", {update_service.TLS_SERVER_AUTH_OID}),
+            (b"ignore-pkcs7", "pkcs_7_asn", True),
+        ],
+    )
+    update_service._trusted_ssl_context.cache_clear()
+
+    assert update_service._trusted_ssl_context() is context
+    assert context.loaded == [b"ROOT-root", b"server-only", b"CA-root", b"server-only"]
+    update_service._trusted_ssl_context.cache_clear()
