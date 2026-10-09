@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 
 UNRECOGNIZED = "未识别"
@@ -43,9 +44,17 @@ class ProgramRecord:
 
 @dataclass(frozen=True, slots=True)
 class ImagePlacement:
-    """One operator-inserted image anchored to an Excel cell."""
+    """One freely positioned picture in the Excel-sheet preview.
+
+    ``anchor`` and offsets are stored in Excel's one-cell-anchor convention,
+    rather than only as a preview coordinate.  This lets a drag in the GUI
+    export to the same cell-relative location in the generated workbook.
+    """
 
     source_path: Path
     anchor: str
     width: int
     height: int
+    offset_x: int = 0
+    offset_y: int = 0
+    placement_id: str = field(default_factory=lambda: uuid4().hex)

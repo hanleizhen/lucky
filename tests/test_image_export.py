@@ -18,7 +18,16 @@ def test_export_anchors_user_image_at_selected_cell_with_requested_size(tmp_path
         source_template,
         output,
         {"J3": "08 / 10 / 2026"},
-        images=[ImagePlacement(source_path=source_image, anchor="B4", width=120, height=60)],
+        images=[
+            ImagePlacement(
+                source_path=source_image,
+                anchor="B4",
+                width=120,
+                height=60,
+                offset_x=17,
+                offset_y=9,
+            )
+        ],
     )
 
     assert source_template.read_bytes() == original_template
@@ -29,6 +38,8 @@ def test_export_anchors_user_image_at_selected_cell_with_requested_size(tmp_path
         image = sheet._images[0]
         assert image.anchor._from.col == 1  # B column, zero based in DrawingML
         assert image.anchor._from.row == 3  # Excel row 4, zero based in DrawingML
+        assert image.anchor._from.colOff == 17 * 9525
+        assert image.anchor._from.rowOff == 9 * 9525
         # DrawingML stores exported dimensions in EMUs (1 px = 9,525 EMUs).
         assert image.anchor.ext.width == 120 * 9525
         assert image.anchor.ext.height == 60 * 9525

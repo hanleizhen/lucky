@@ -4,16 +4,17 @@ import os
 import sys
 import traceback
 import xml.etree.ElementTree as ElementTree
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QIODevice, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPalette, QPixmap
+from PySide6.QtCore import QBuffer, QIODevice, QPoint, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -29,7 +30,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -108,6 +108,189 @@ class Worker(QThread):
             self.failed.emit(str(exc))
 
 
+class FloatingImageOverlay(QWidget):
+    """An Excel-like floating image object drawn above the table viewport."""
+
+    selected = Signal(str)
+    geometry_committed = Signal(str, int, int, int, int)
+    delete_requested = Signal(str)
+
+    _HANDLE_SIZE = 8
+    _MINIMUM_SIZE = 32
+
+    def __init__(self, preview: "ExcelPreview", placement: ImagePlacement) -> None:
+        super().__init__(preview.viewport())
+        self._preview = preview
+        self._placement = placement
+        self._pixmap = QPixmap(str(placement.source_path))
+        self._selected = False
+        self._drag_mode = ""
+        self._start_global = QPoint()
+        self._start_geometry = (0, 0, placement.width, placement.height)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("拖动图片可移动；拖动蓝色控制点可调整大小；按 Delete 或点击“删除图片”可删除。")
+
+    @property
+    def placement_id(self) -> str:
+        return self._placement.placement_id
+
+    @property
+    def placement(self) -> ImagePlacement:
+        return self._placement
+
+    def set_placement(self, placement: ImagePlacement) -> None:
+        self._placement = placement
+        self._pixmap = QPixmap(str(placement.source_path))
+        self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        if self._selected != selected:
+            self._selected = selected
+            self.update()
+
+    def set_sheet_geometry(self, x: int, y: int, width: int, height: int) -> None:
+        view_x, view_y = self._preview.sheet_to_viewport(x, y)
+        self.setGeometry(view_x, view_y, max(self._MINIMUM_SIZE, width), max(self._MINIMUM_SIZE, height))
+
+    def sheet_geometry(self) -> tuple[int, int, int, int]:
+        x, y = self._preview.viewport_to_sheet(self.pos().x(), self.pos().y())
+        return x, y, self.width(), self.height()
+
+    def _handle_at(self, point: QPoint) -> str:
+        if not self._selected:
+            return "move"
+        edge = self._HANDLE_SIZE
+        left = point.x() <= edge
+        right = point.x() >= self.width() - edge
+        top = point.y() <= edge
+        bottom = point.y() >= self.height() - edge
+        if top and left:
+            return "nw"
+        if top and right:
+            return "ne"
+        if bottom and left:
+            return "sw"
+        if bottom and right:
+            return "se"
+        if top:
+            return "n"
+        if bottom:
+            return "s"
+        if left:
+            return "w"
+        if right:
+            return "e"
+        return "move"
+
+    @staticmethod
+    def _cursor_for_mode(mode: str) -> Qt.CursorShape:
+        if mode in {"nw", "se"}:
+            return Qt.CursorShape.SizeFDiagCursor
+        if mode in {"ne", "sw"}:
+            return Qt.CursorShape.SizeBDiagCursor
+        if mode in {"n", "s"}:
+            return Qt.CursorShape.SizeVerCursor
+        if mode in {"e", "w"}:
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.OpenHandCursor
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._selected = True
+        self.selected.emit(self.placement_id)
+        self._drag_mode = self._handle_at(event.position().toPoint())
+        self._start_global = event.globalPosition().toPoint()
+        self._start_geometry = self.sheet_geometry()
+        self.setCursor(Qt.CursorShape.ClosedHandCursor if self._drag_mode == "move" else self._cursor_for_mode(self._drag_mode))
+        self.grabMouse()
+        self.setFocus()
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        if not self._drag_mode:
+            self.setCursor(self._cursor_for_mode(self._handle_at(event.position().toPoint())))
+            event.accept()
+            return
+        delta = event.globalPosition().toPoint() - self._start_global
+        x, y, width, height = self._start_geometry
+        mode = self._drag_mode
+        if mode == "move":
+            x += delta.x()
+            y += delta.y()
+        else:
+            if "e" in mode:
+                width += delta.x()
+            if "s" in mode:
+                height += delta.y()
+            if "w" in mode:
+                x += delta.x()
+                width -= delta.x()
+            if "n" in mode:
+                y += delta.y()
+                height -= delta.y()
+        x, y, width, height = self._preview.constrain_image_geometry(x, y, width, height, self._MINIMUM_SIZE)
+        self.set_sheet_geometry(x, y, width, height)
+        event.accept()
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_mode:
+            self.releaseMouse()
+            self._drag_mode = ""
+            x, y, width, height = self.sheet_geometry()
+            self.geometry_committed.emit(self.placement_id, x, y, width, height)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Delete:
+            self.delete_requested.emit(self.placement_id)
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self._preview.clipboard_image_paste_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if not self._pixmap.isNull():
+            painter.drawPixmap(self.rect(), self._pixmap)
+        else:
+            painter.fillRect(self.rect(), QColor("#FCE4D6"))
+            painter.setPen(QColor("#C00000"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "无法读取图片")
+        if self._selected:
+            painter.setPen(QPen(QColor("#2F75B5"), 2))
+            painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.setPen(QPen(QColor("#2F75B5"), 1))
+            for point in (
+                QPoint(0, 0),
+                QPoint(self.width() // 2, 0),
+                QPoint(self.width() - 1, 0),
+                QPoint(0, self.height() // 2),
+                QPoint(self.width() - 1, self.height() // 2),
+                QPoint(0, self.height() - 1),
+                QPoint(self.width() // 2, self.height() - 1),
+                QPoint(self.width() - 1, self.height() - 1),
+            ):
+                painter.drawRect(
+                    point.x() - self._HANDLE_SIZE // 2,
+                    point.y() - self._HANDLE_SIZE // 2,
+                    self._HANDLE_SIZE,
+                    self._HANDLE_SIZE,
+                )
+
+
 class ExcelPreview(QTableWidget):
     """Editable in-app preview of the real sheet values and major formatting."""
 
@@ -115,12 +298,15 @@ class ExcelPreview(QTableWidget):
     insert_blank_row_requested = Signal(int)
     remove_blank_row_requested = Signal(int)
     clipboard_image_paste_requested = Signal()
+    image_geometry_changed = Signal(str, str, int, int, int, int)
+    image_delete_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._loading = False
         self._theme_colors: list[str] = []
-        self._image_marker_cells: set[str] = set()
+        self._image_overlays: dict[str, FloatingImageOverlay] = {}
+        self._selected_image_id: str | None = None
         # QTableWidget only contains an item at the top-left of an Excel
         # merged range.  Keep the mapping for every covered preview cell so
         # actions such as Ctrl+V still have a valid Excel anchor.
@@ -134,10 +320,14 @@ class ExcelPreview(QTableWidget):
         self.setPalette(palette)
         self.setAlternatingRowColors(False)
         self.setWordWrap(True)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_program_row_menu)
         self.itemChanged.connect(self._on_item_changed)
+        self.horizontalScrollBar().valueChanged.connect(lambda _: self._reposition_image_overlays())
+        self.verticalScrollBar().valueChanged.connect(lambda _: self._reposition_image_overlays())
 
     @staticmethod
     def _is_program_table_row(row: int) -> bool:
@@ -174,6 +364,10 @@ class ExcelPreview(QTableWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._reposition_image_overlays)
 
     def shift_program_row_values(self, start_table_row: int, direction: int) -> None:
         """Move visible program-row values while retaining every cell's style.
@@ -268,7 +462,7 @@ class ExcelPreview(QTableWidget):
             sheet = workbook[LAYOUT.sheet_name]
             self._loading = True
             self._theme_colors = self._theme_palette(workbook.loaded_theme)
-            self._image_marker_cells.clear()
+            self._clear_image_overlays()
             self._merged_cell_roots.clear()
             self.clear()
             self.setRowCount(sheet.max_row)
@@ -318,6 +512,7 @@ class ExcelPreview(QTableWidget):
         finally:
             self._loading = False
             workbook.close()
+        QTimer.singleShot(0, self._reposition_image_overlays)
 
     @staticmethod
     def _column_name(number: int) -> str:
@@ -354,45 +549,129 @@ class ExcelPreview(QTableWidget):
             return str(coordinate)
         return self._merged_cell_roots.get((row, column))
 
-    def refresh_image_markers(self, placements: list[ImagePlacement]) -> None:
-        """Show small image markers in the preview; export retains full size."""
+    @property
+    def selected_image_id(self) -> str | None:
+        return self._selected_image_id
 
-        for coordinate in self._image_marker_cells:
-            row_digits = "".join(character for character in coordinate if character.isdigit())
-            column_letters = "".join(character for character in coordinate if character.isalpha())
-            if not row_digits or not column_letters:
-                continue
-            column = 0
-            for character in column_letters:
-                column = column * 26 + ord(character) - 64
-            item = self.item(int(row_digits) - 1, column - 1)
-            if item is not None:
-                item.setIcon(QIcon())
-                item.setToolTip(coordinate)
-        self._image_marker_cells.clear()
+    @staticmethod
+    def _column_number(letters: str) -> int:
+        number = 0
+        for character in letters:
+            number = number * 26 + ord(character) - 64
+        return number
 
-        grouped: dict[str, list[ImagePlacement]] = {}
+    def _sheet_size(self) -> tuple[int, int]:
+        return (
+            sum(self.columnWidth(column) for column in range(self.columnCount())),
+            sum(self.rowHeight(row) for row in range(self.rowCount())),
+        )
+
+    def _placement_sheet_position(self, placement: ImagePlacement) -> tuple[int, int]:
+        letters = "".join(character for character in placement.anchor if character.isalpha())
+        digits = "".join(character for character in placement.anchor if character.isdigit())
+        if not letters or not digits:
+            return placement.offset_x, placement.offset_y
+        column = self._column_number(letters) - 1
+        row = int(digits) - 1
+        x = sum(self.columnWidth(index) for index in range(max(0, column))) + placement.offset_x
+        y = sum(self.rowHeight(index) for index in range(max(0, row))) + placement.offset_y
+        return x, y
+
+    def _anchor_for_sheet_position(self, x: int, y: int) -> tuple[str, int, int]:
+        sheet_width, sheet_height = self._sheet_size()
+        x = min(max(0, round(x)), max(0, sheet_width - 1))
+        y = min(max(0, round(y)), max(0, sheet_height - 1))
+        column = 0
+        column_start = 0
+        for index in range(self.columnCount()):
+            width = self.columnWidth(index)
+            if x < column_start + width or index == self.columnCount() - 1:
+                column = index
+                break
+            column_start += width
+        row = 0
+        row_start = 0
+        for index in range(self.rowCount()):
+            height = self.rowHeight(index)
+            if y < row_start + height or index == self.rowCount() - 1:
+                row = index
+                break
+            row_start += height
+        return f"{self._column_name(column + 1)}{row + 1}", x - column_start, y - row_start
+
+    def sheet_to_viewport(self, x: int, y: int) -> tuple[int, int]:
+        return x - self.horizontalScrollBar().value(), y - self.verticalScrollBar().value()
+
+    def viewport_to_sheet(self, x: int, y: int) -> tuple[int, int]:
+        return x + self.horizontalScrollBar().value(), y + self.verticalScrollBar().value()
+
+    def constrain_image_geometry(
+        self, x: int, y: int, width: int, height: int, minimum_size: int = 32
+    ) -> tuple[int, int, int, int]:
+        sheet_width, sheet_height = self._sheet_size()
+        width = min(max(minimum_size, round(width)), max(minimum_size, sheet_width))
+        height = min(max(minimum_size, round(height)), max(minimum_size, sheet_height))
+        x = min(max(0, round(x)), max(0, sheet_width - width))
+        y = min(max(0, round(y)), max(0, sheet_height - height))
+        return x, y, width, height
+
+    def _clear_image_overlays(self) -> None:
+        for overlay in self._image_overlays.values():
+            overlay.hide()
+            overlay.deleteLater()
+        self._image_overlays.clear()
+        self._selected_image_id = None
+
+    def refresh_floating_images(self, placements: list[ImagePlacement]) -> None:
+        """Render operator pictures as movable objects above the spreadsheet."""
+
+        wanted_ids = {placement.placement_id for placement in placements}
+        for placement_id, overlay in tuple(self._image_overlays.items()):
+            if placement_id not in wanted_ids:
+                overlay.hide()
+                overlay.deleteLater()
+                del self._image_overlays[placement_id]
+        if self._selected_image_id not in wanted_ids:
+            self._selected_image_id = None
         for placement in placements:
-            grouped.setdefault(placement.anchor, []).append(placement)
-        for coordinate, anchored_images in grouped.items():
-            row_digits = "".join(character for character in coordinate if character.isdigit())
-            column_letters = "".join(character for character in coordinate if character.isalpha())
-            if not row_digits or not column_letters:
-                continue
-            column = 0
-            for character in column_letters:
-                column = column * 26 + ord(character) - 64
-            item = self.item(int(row_digits) - 1, column - 1)
-            if item is None:
-                continue
-            thumbnail = QPixmap(str(anchored_images[0].source_path))
-            if thumbnail.isNull():
-                continue
-            thumbnail = thumbnail.scaled(72, 52, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            item.setIcon(QIcon(thumbnail))
-            names = "、".join(image.source_path.name for image in anchored_images)
-            item.setToolTip(f"{coordinate}\n已插入图片：{names}\n导出 Excel 将按设定尺寸显示")
-            self._image_marker_cells.add(coordinate)
+            overlay = self._image_overlays.get(placement.placement_id)
+            if overlay is None:
+                overlay = FloatingImageOverlay(self, placement)
+                overlay.selected.connect(self._select_image)
+                overlay.geometry_committed.connect(self._commit_overlay_geometry)
+                overlay.delete_requested.connect(self.image_delete_requested)
+                self._image_overlays[placement.placement_id] = overlay
+            else:
+                overlay.set_placement(placement)
+            overlay.set_selected(placement.placement_id == self._selected_image_id)
+        self._reposition_image_overlays()
+
+    def _reposition_image_overlays(self) -> None:
+        for overlay in self._image_overlays.values():
+            x, y = self._placement_sheet_position(overlay.placement)
+            overlay.set_sheet_geometry(x, y, overlay.placement.width, overlay.placement.height)
+            overlay.show()
+            overlay.raise_()
+        if self._selected_image_id and self._selected_image_id in self._image_overlays:
+            self._image_overlays[self._selected_image_id].raise_()
+
+    def _select_image(self, placement_id: str) -> None:
+        self._selected_image_id = placement_id
+        for candidate_id, overlay in self._image_overlays.items():
+            overlay.set_selected(candidate_id == placement_id)
+        selected = self._image_overlays.get(placement_id)
+        if selected is not None:
+            selected.raise_()
+
+    def select_image(self, placement_id: str) -> None:
+        """Select one floating picture after it has been added programmatically."""
+
+        if placement_id in self._image_overlays:
+            self._select_image(placement_id)
+
+    def _commit_overlay_geometry(self, placement_id: str, x: int, y: int, width: int, height: int) -> None:
+        anchor, offset_x, offset_y = self._anchor_for_sheet_position(x, y)
+        self.image_geometry_changed.emit(placement_id, anchor, offset_x, offset_y, width, height)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         coordinate = item.data(Qt.ItemDataRole.UserRole)
@@ -415,67 +694,6 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
-
-
-class ImageInsertDialog(QDialog):
-    """Choose the exported Excel size for an image anchored to one cell."""
-
-    def __init__(
-        self,
-        image_path: Path,
-        anchor: str,
-        parent: QWidget | None = None,
-        source_label: str | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("插入图片")
-        image = QImage(str(image_path))
-        if image.isNull():
-            raise ValueError("无法读取图片文件")
-        self._ratio = image.width() / image.height()
-        self._resizing = False
-        self.width_input = QSpinBox()
-        self.height_input = QSpinBox()
-        for control in (self.width_input, self.height_input):
-            control.setRange(1, 10000)
-        self.width_input.setValue(image.width())
-        self.height_input.setValue(image.height())
-        self.keep_ratio = QCheckBox("保持宽高比例")
-        self.keep_ratio.setChecked(True)
-        self.width_input.valueChanged.connect(self._width_changed)
-        self.height_input.valueChanged.connect(self._height_changed)
-
-        layout = QFormLayout(self)
-        layout.addRow("图片：", QLabel(source_label or image_path.name))
-        layout.addRow("插入单元格：", QLabel(anchor))
-        layout.addRow("宽度（像素）：", self.width_input)
-        layout.addRow("高度（像素）：", self.height_input)
-        layout.addRow(self.keep_ratio)
-        hint = QLabel("预览显示缩略图；导出的 Excel 会使用这里设置的实际图片尺寸。")
-        hint.setWordWrap(True)
-        layout.addRow(hint)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def _width_changed(self, width: int) -> None:
-        if self._resizing or not self.keep_ratio.isChecked():
-            return
-        self._resizing = True
-        self.height_input.setValue(max(1, round(width / self._ratio)))
-        self._resizing = False
-
-    def _height_changed(self, height: int) -> None:
-        if self._resizing or not self.keep_ratio.isChecked():
-            return
-        self._resizing = True
-        self.width_input.setValue(max(1, round(height * self._ratio)))
-        self._resizing = False
-
-    @property
-    def image_size(self) -> tuple[int, int]:
-        return self.width_input.value(), self.height_input.value()
 
 
 class MainWindow(QMainWindow):
@@ -523,7 +741,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(template)
         insert_image = QPushButton("插入图片")
         insert_image.clicked.connect(self.insert_image)
-        insert_image.setToolTip("选择图片文件；也可在右侧预览选中单元格后按 Ctrl+V 粘贴截图或图片")
+        insert_image.setToolTip("选择图片文件；也可在右侧预览选中单元格后按 Ctrl+V 粘贴截图或图片。插入后可直接拖动、缩放。")
         toolbar.addWidget(insert_image)
         remove_image = QPushButton("删除图片")
         remove_image.clicked.connect(self.remove_images_at_selected_cell)
@@ -574,6 +792,8 @@ class MainWindow(QMainWindow):
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
         self.preview.clipboard_image_paste_requested.connect(self.paste_image_from_clipboard)
+        self.preview.image_geometry_changed.connect(self._update_image_geometry)
+        self.preview.image_delete_requested.connect(self._remove_image_by_id)
         right_layout.addWidget(self.preview)
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -601,7 +821,7 @@ class MainWindow(QMainWindow):
             self.template_path = path
             self.preview.load_template(path)
             self.image_placements.clear()
-            self.preview.refresh_image_markers(self.image_placements)
+            self.preview.refresh_floating_images(self.image_placements)
             self._program_area_reset = False
             # The template's DATE value is a generated field, not a permanent
             # part of the source workbook. Show today's date immediately.
@@ -620,7 +840,7 @@ class MainWindow(QMainWindow):
             self.load_template(Path(filename))
 
     def insert_image(self) -> None:
-        """Anchor a selected image to the currently selected Excel cell."""
+        """Add a file image as a movable object at the selected Excel cell."""
 
         anchor = self.preview.current_coordinate()
         if not anchor:
@@ -636,31 +856,52 @@ class MainWindow(QMainWindow):
             return
         try:
             image_path = Path(filename)
-            size = self._choose_image_size(image_path, anchor)
-            if size is None:
-                return
             cached_image = copy_user_image(image_path)
-            self._add_image_placement(cached_image, anchor, *size)
+            self._add_image_placement(cached_image, anchor, *self._default_image_size(cached_image))
         except Exception as exc:
             self.show_error("无法插入图片", str(exc))
 
-    def _choose_image_size(
-        self,
-        image_path: Path,
-        anchor: str,
-        source_label: str | None = None,
-    ) -> tuple[int, int] | None:
-        dialog = ImageInsertDialog(image_path, anchor, self, source_label=source_label)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return dialog.image_size
+    @staticmethod
+    def _default_image_size(image_path: Path) -> tuple[int, int]:
+        """Use a comfortably visible initial size; users can then resize on canvas."""
+
+        image = QImage(str(image_path))
+        if image.isNull():
+            raise ValueError("无法读取图片文件")
+        scale = min(1.0, 520 / image.width(), 360 / image.height())
+        # Tiny source files should not turn back into the almost invisible
+        # cell icon behaviour this floating editor replaces.  Keep them large
+        # enough to grab, without exceeding the initial canvas bounds.
+        if max(image.width() * scale, image.height() * scale) < 160:
+            scale = min(160 / max(image.width(), image.height()), 520 / image.width(), 360 / image.height())
+        return max(1, round(image.width() * scale)), max(1, round(image.height() * scale))
 
     def _add_image_placement(self, image_path: Path, anchor: str, width: int, height: int) -> None:
-        self.image_placements.append(
-            ImagePlacement(source_path=image_path, anchor=anchor, width=width, height=height)
-        )
-        self.preview.refresh_image_markers(self.image_placements)
-        self.statusBar().showMessage(f"已将图片插入到 {anchor}；导出 Excel 时会保留该图片。", 4500)
+        placement = ImagePlacement(source_path=image_path, anchor=anchor, width=width, height=height)
+        self.image_placements.append(placement)
+        self.preview.refresh_floating_images(self.image_placements)
+        self.preview.select_image(placement.placement_id)
+        self.statusBar().showMessage("图片已插入：可直接拖动图片移动，拖动蓝色控制点调整大小。", 5000)
+
+    def _update_image_geometry(
+        self, placement_id: str, anchor: str, offset_x: int, offset_y: int, width: int, height: int
+    ) -> None:
+        self.image_placements = [
+            replace(
+                placement,
+                anchor=anchor,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                width=width,
+                height=height,
+            )
+            if placement.placement_id == placement_id
+            else placement
+            for placement in self.image_placements
+        ]
+        self.preview.refresh_floating_images(self.image_placements)
+        self.preview.select_image(placement_id)
+        self.statusBar().showMessage("图片位置和大小已更新；保存后将同步到 Excel。", 3500)
 
     def paste_image_from_clipboard(self) -> None:
         """Paste a screenshot, copied picture, or copied local image file."""
@@ -677,7 +918,6 @@ class MainWindow(QMainWindow):
                 if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not image.save(buffer, "PNG"):
                     raise ValueError("无法读取剪贴板中的图片")
                 cached_image = cache_user_image_bytes(bytes(buffer.data()), "clipboard.png")
-                size = self._choose_image_size(cached_image, anchor, "剪贴板图片或截图")
             else:
                 source = next(
                     (
@@ -689,26 +929,37 @@ class MainWindow(QMainWindow):
                 )
                 if source is None:
                     raise ValueError("剪贴板中没有可粘贴的图片或截图")
-                size = self._choose_image_size(source, anchor, f"剪贴板文件：{source.name}")
                 cached_image = copy_user_image(source)
-            if size is None:
-                return
-            self._add_image_placement(cached_image, anchor, *size)
+            self._add_image_placement(cached_image, anchor, *self._default_image_size(cached_image))
         except Exception as exc:
             self.show_error("无法粘贴图片", str(exc))
 
     def remove_images_at_selected_cell(self) -> None:
+        selected_id = self.preview.selected_image_id
+        if selected_id:
+            self._remove_image_by_id(selected_id)
+            return
         anchor = self.preview.current_coordinate()
         if not anchor:
-            self.show_error("请选择图片位置", "请先在右侧 Excel 预览中点击图片所在的单元格。")
+            self.show_error("请选择图片位置", "请先选中图片，或在右侧 Excel 预览中点击图片所在的单元格。")
             return
         original_count = len(self.image_placements)
         self.image_placements = [placement for placement in self.image_placements if placement.anchor != anchor]
         if len(self.image_placements) == original_count:
             self.statusBar().showMessage(f"{anchor} 没有已插入的图片。", 3500)
             return
-        self.preview.refresh_image_markers(self.image_placements)
+        self.preview.refresh_floating_images(self.image_placements)
         self.statusBar().showMessage(f"已移除 {anchor} 的图片。", 3500)
+
+    def _remove_image_by_id(self, placement_id: str) -> None:
+        original_count = len(self.image_placements)
+        self.image_placements = [
+            placement for placement in self.image_placements if placement.placement_id != placement_id
+        ]
+        if len(self.image_placements) == original_count:
+            return
+        self.preview.refresh_floating_images(self.image_placements)
+        self.statusBar().showMessage("已移除选中的图片。", 3500)
 
     def choose_nc_files(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
@@ -769,17 +1020,15 @@ class MainWindow(QMainWindow):
                 destination = index + direction
                 if 0 <= destination < LAYOUT.capacity:
                     shifted.append(
-                        ImagePlacement(
-                            source_path=placement.source_path,
+                        replace(
+                            placement,
                             anchor=f"{letters}{LAYOUT.first_program_row + destination}",
-                            width=placement.width,
-                            height=placement.height,
                         )
                     )
             else:
                 shifted.append(placement)
         self.image_placements = shifted
-        self.preview.refresh_image_markers(self.image_placements)
+        self.preview.refresh_floating_images(self.image_placements)
 
     def _shift_tracked_program_cells(self, start_index: int, direction: int) -> None:
         """Shift exported manual values in lockstep with the preview values."""
@@ -948,7 +1197,7 @@ class MainWindow(QMainWindow):
         self._set_result_table()
         if self.template_path:
             self.preview.load_template(self.template_path)
-            self.preview.refresh_image_markers(self.image_placements)
+            self.preview.refresh_floating_images(self.image_placements)
             self.manual_cells.update(automatic_cells_for_rows([]))
             self.preview.set_value(LAYOUT.date_cell, self.manual_cells[LAYOUT.date_cell])
         self.statusBar().showMessage("已恢复到未填写的模板预览。", 3500)

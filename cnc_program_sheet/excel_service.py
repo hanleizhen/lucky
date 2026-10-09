@@ -10,6 +10,10 @@ from typing import Mapping, Sequence
 
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
+from openpyxl.utils.units import pixels_to_EMU
 
 from .models import ImagePlacement, ProgramRecord
 
@@ -188,13 +192,26 @@ def export_workbook(
                 raise TemplateError(f"找不到已插入的图片：{placement.source_path}")
             if placement.width <= 0 or placement.height <= 0:
                 raise TemplateError(f"图片尺寸无效：{placement.source_path.name}")
+            if placement.offset_x < 0 or placement.offset_y < 0:
+                raise TemplateError(f"图片位置无效：{placement.source_path.name}")
             try:
                 image = ExcelImage(str(placement.source_path))
             except Exception as exc:
                 raise TemplateError(f"无法读取图片“{placement.source_path.name}”：{exc}") from exc
-            image.width = placement.width
-            image.height = placement.height
-            sheet.add_image(image, placement.anchor)
+            column_letters, row = coordinate_from_string(placement.anchor)
+            image.anchor = OneCellAnchor(
+                _from=AnchorMarker(
+                    col=column_index_from_string(column_letters) - 1,
+                    row=row - 1,
+                    colOff=pixels_to_EMU(placement.offset_x),
+                    rowOff=pixels_to_EMU(placement.offset_y),
+                ),
+                ext=XDRPositiveSize2D(
+                    cx=pixels_to_EMU(placement.width),
+                    cy=pixels_to_EMU(placement.height),
+                ),
+            )
+            sheet.add_image(image)
         workbook.save(target)
     except Exception:
         # A failed save does not touch the source template.  The caller always

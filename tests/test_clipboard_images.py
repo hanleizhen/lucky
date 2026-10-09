@@ -55,7 +55,6 @@ def test_main_window_pastes_clipboard_screenshot_at_selected_excel_cell(tmp_path
     # B4 is a covered cell in the A4:B4 merge.  Selecting it must resolve to
     # the merge root instead of opening the "select a paste location" error.
     window.preview.setCurrentCell(3, 1)
-    monkeypatch.setattr(window, "_choose_image_size", lambda *_: (120, 60))
     image = QImage(24, 12, QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.blue)
     QApplication.clipboard().setImage(image)
@@ -64,9 +63,10 @@ def test_main_window_pastes_clipboard_screenshot_at_selected_excel_cell(tmp_path
 
     assert len(window.image_placements) == 1
     placement = window.image_placements[0]
-    assert (placement.anchor, placement.width, placement.height) == ("A4", 120, 60)
+    assert (placement.anchor, placement.width, placement.height) == ("A4", 160, 80)
     assert placement.source_path == cached_image and cached_image.is_file()
-    assert not window.preview.item(3, 0).icon().isNull()
+    assert placement.placement_id in window.preview._image_overlays
+    assert window.preview.item(3, 0).icon().isNull()
     QApplication.clipboard().clear()
     window.close()
     assert app is not None
