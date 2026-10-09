@@ -5,7 +5,7 @@ import re
 import sys
 import traceback
 import xml.etree.ElementTree as ElementTree
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -58,7 +60,8 @@ from .excel_service import (
     verify_template,
 )
 from .models import ImagePlacement, ProgramRecord, UNRECOGNIZED
-from .nc_parser import parse_file_records
+from .nc_parser import parse_file_records, parse_records_text
+from .nc_transform import TransformMode, decode_windows_default, encode_windows_default, transform_file
 from .update_service import (
     UpdateError,
     UpdateInfo,
@@ -84,6 +87,18 @@ FIELD_NAMES = {field for _, field in RESULT_COLUMNS if field != "status"}
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 ROTATION_MARKERS = ("❮Y⟲180°❯", "❮X⟲180°❯", "❮Z⟲180°❯")
 MARKER_RED = QColor("#FF0000")
+CONVERSION_TAG_BACKGROUND = QColor("#DDEBF7")
+CONVERSION_TAG_FOREGROUND = QColor("#1F4E78")
+CONVERSION_TAGS = {
+    TransformMode.M06: "M06",
+    TransformMode.M304: "M304",
+    TransformMode.COPPER: "TG",
+}
+CONVERSION_TITLES = {
+    TransformMode.M06: "M06 程序修改",
+    TransformMode.M304: "M304 程序修改",
+    TransformMode.COPPER: "铜工程序修改",
+}
 
 
 def natural_program_sort_key(name: str) -> tuple[object, ...]:
@@ -172,6 +187,361 @@ class Worker(QThread):
             self.succeeded.emit(self._task())
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+@dataclass(slots=True)
+class ConversionSource:
+    """One NC program staged in a conversion page before it is overwritten."""
+
+    source_path: Path
+    text: str
+
+
+@dataclass(slots=True)
+class ConversionResult:
+    """One successfully written shortcut output ready for program-sheet import.
+
+    M06 deliberately removes the controller's ``T...M6`` boundaries.  Its
+    optional snapshot therefore retains the operator-reviewed text from
+    immediately before the exact legacy conversion, allowing a multi-tool
+    program to keep one row per original tool section in the program sheet.
+    The NC file written to disk is still the unmodified legacy result.
+    """
+
+    source_path: Path
+    target_path: Path
+    parser_snapshot: str | None = None
+
+
+class NcConversionDropArea(QLabel):
+    """Focusable drag/drop target used by the M06, M304 and copper pages."""
+
+    paths_dropped = Signal(object)
+    paste_requested = Signal()
+
+    def __init__(self, accepts_path: Callable[[Path], bool], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._accepts_path = accepts_path
+        self.setObjectName("conversionDropArea")
+        self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumHeight(74)
+        self.setText("将 NC 程序拖到这里，或点击此处后按 Ctrl+V 导入\n支持复制的 NC 文件和 NC 程序文本")
+
+    def dragEnterEvent(self, event: Any) -> None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(self._accepts_path(Path(url.toLocalFile())) for url in urls if url.isLocalFile()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: Any) -> None:
+        paths = [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()
+            if url.isLocalFile() and self._accepts_path(Path(url.toLocalFile()))
+        ]
+        self.paths_dropped.emit(paths)
+        event.acceptProposedAction()
+
+    def mousePressEvent(self, event: Any) -> None:
+        # QLabel does not automatically take keyboard focus on a click.  The
+        # explicit focus change makes the on-screen "click then Ctrl+V"
+        # instruction reliable.
+        self.setFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class NcConversionDialog(QDialog):
+    """Editable staging page for one of the three existing NC shortcuts.
+
+    The UI deliberately stages data before the irreversible write.  The
+    eventual transformation itself is delegated to ``nc_transform`` and
+    therefore preserves the historic shortcut rules exactly.
+    """
+
+    def __init__(self, mode: TransformMode, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.mode = mode
+        self.converted_files: list[ConversionResult] = []
+        self._sources: list[ConversionSource] = []
+        self._active_index = -1
+        self._loading_editor = False
+        self.setWindowTitle(CONVERSION_TITLES[mode])
+        self.resize(1020, 650)
+        self.setAcceptDrops(True)
+
+        root = QVBoxLayout(self)
+        title = QLabel(f"{CONVERSION_TITLES[mode]}（原快捷方式兼容模式）")
+        title_font = title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title.setFont(title_font)
+        root.addWidget(title)
+
+        notice = QLabel(self._notice_text())
+        notice.setWordWrap(True)
+        notice.setStyleSheet("color: #5b5b5b;")
+        root.addWidget(notice)
+
+        self.drop_area = NcConversionDropArea(self._path_is_supported_by_mode)
+        self.drop_area.paths_dropped.connect(self.add_paths)
+        self.drop_area.paste_requested.connect(self.import_from_clipboard)
+        root.addWidget(self.drop_area)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        files_panel = QWidget()
+        files_layout = QVBoxLayout(files_panel)
+        files_layout.setContentsMargins(0, 0, 0, 0)
+        files_layout.addWidget(QLabel("已导入 NC 文件"))
+        self.file_list = QListWidget()
+        self.file_list.setMinimumWidth(290)
+        self.file_list.currentRowChanged.connect(self._select_source)
+        self.file_list.installEventFilter(self)
+        files_layout.addWidget(self.file_list, 1)
+        choose = QPushButton("选择 NC 文件")
+        choose.clicked.connect(self.choose_files)
+        files_layout.addWidget(choose)
+        splitter.addWidget(files_panel)
+
+        editor_panel = QWidget()
+        editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        self.editor_title = QLabel("NC 程序内容（可直接手动修改）")
+        editor_layout.addWidget(self.editor_title)
+        self.editor = QPlainTextEdit()
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor.setPlaceholderText("从左侧选择一个 NC 文件后，可在这里查看和手动修改程序内容。")
+        self.editor.setEnabled(False)
+        self.editor.textChanged.connect(self._store_editor_text)
+        editor_layout.addWidget(self.editor, 1)
+        splitter.addWidget(editor_panel)
+        splitter.setSizes([350, 650])
+        root.addWidget(splitter, 1)
+
+        self.summary = QLabel("尚未导入 NC 文件。")
+        root.addWidget(self.summary)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.apply_button = QPushButton("执行修改并填写程序单")
+        self.apply_button.setObjectName("primaryButton")
+        self.apply_button.clicked.connect(self.apply_conversion)
+        buttons.addButton(self.apply_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _notice_text(self) -> str:
+        if self.mode is TransformMode.M06:
+            return "会按原 M6 快捷方式原地覆盖 .NC 文件：任何含有“ M6 ”字样的整行都会删除，不建立备份。"
+        if self.mode is TransformMode.M304:
+            return "会按原 M304 快捷方式原地覆盖文件：在既定 G43/M8 与 M5 位置插入指令，不建立备份。"
+        return "会按原铜工快捷方式生成同名无后缀文件并删除原 .NC；安全行和 M30/M99 规则完全保持不变。"
+
+    def _path_is_supported_by_mode(self, path: Path) -> bool:
+        if not is_supported_nc_file(path):
+            return False
+        # These two source shortcuts themselves skip extensionless files.
+        return self.mode is TransformMode.M304 or path.suffix.casefold() == ".nc"
+
+    def choose_files(self) -> None:
+        filenames, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择 NC 程序",
+            str(Path.home()),
+            "NC 程序 (*.NC *.nc);;铜工无扩展名程序 (*)",
+        )
+        self.add_paths([Path(filename) for filename in filenames])
+
+    def dragEnterEvent(self, event: Any) -> None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(self._path_is_supported_by_mode(Path(url.toLocalFile())) for url in urls if url.isLocalFile()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: Any) -> None:
+        self.add_paths([Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()])
+        event.acceptProposedAction()
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if watched is self.file_list and event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
+            self.import_from_clipboard()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.import_from_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def import_from_clipboard(self) -> None:
+        mime_data = QApplication.clipboard().mimeData()
+        paths = clipboard_nc_paths(mime_data)
+        if paths:
+            self.add_paths(paths)
+            return
+        text = mime_data.text() if mime_data.hasText() else ""
+        if not is_nc_program_text(text):
+            QMessageBox.information(self, "无法导入", "剪贴板中没有可识别的 NC 文件或 NC 程序文本。")
+            return
+        try:
+            self._save_pasted_source(text)
+        except Exception as exc:
+            QMessageBox.critical(self, "无法导入 NC 程序", str(exc))
+
+    def _save_pasted_source(self, text: str) -> None:
+        """Ask for a real source location when clipboard text has no path.
+
+        Explorer-copied files retain their original folders automatically.
+        Plain NC text carries no filesystem path at all, so asking once for a
+        location is the only way to honour the shortcut's original-folder
+        overwrite behaviour rather than silently changing a hidden cache.
+        """
+
+        suggested = Path.home() / clipboard_nc_filename(text)
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择粘贴 NC 程序的保存位置",
+            str(suggested),
+            "NC 程序 (*.NC *.nc);;所有文件 (*)",
+        )
+        if not filename:
+            return
+        target = Path(filename)
+        if self.mode is not TransformMode.M304 and target.suffix.casefold() != ".nc":
+            target = target.with_suffix(".NC")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(encode_windows_default(text))
+        self._append_source(target, text)
+        self.summary.setText(f"已将剪贴板 NC 文本保存到：{target.parent}；执行后会按原快捷方式覆盖该文件。")
+
+    def add_paths(self, paths: list[Path]) -> None:
+        skipped = 0
+        for path in sorted(paths, key=lambda item: natural_program_sort_key(item.name)):
+            if not self._path_is_supported_by_mode(path):
+                skipped += 1
+                continue
+            try:
+                self._append_source(path)
+            except Exception as exc:
+                QMessageBox.critical(self, "无法读取 NC 程序", f"{path.name}\n\n{exc}")
+        if skipped:
+            self.summary.setText("部分文件未导入：该快捷方式原本只处理 .NC 文件。")
+
+    def _append_source(self, path: Path, text: str | None = None) -> None:
+        source_path = path.resolve()
+        if any(source.source_path == source_path for source in self._sources):
+            return
+        source_text = text if text is not None else decode_windows_default(source_path.read_bytes())
+        index = len(self._sources)
+        self._sources.append(ConversionSource(source_path, source_text))
+        item = QListWidgetItem(f"{CONVERSION_TAGS[self.mode]}    {source_path.name}")
+        item.setData(Qt.ItemDataRole.UserRole, index)
+        item.setBackground(CONVERSION_TAG_BACKGROUND)
+        item.setForeground(CONVERSION_TAG_FOREGROUND)
+        item_font = item.font()
+        item_font.setBold(True)
+        item.setFont(item_font)
+        self.file_list.addItem(item)
+        self.summary.setText(f"已导入 {len(self._sources)} 个程序；可在右侧检查、修改后执行。")
+        if self.file_list.currentRow() < 0:
+            self.file_list.setCurrentRow(0)
+
+    def _select_source(self, index: int) -> None:
+        self._store_editor_text()
+        self._active_index = index
+        self._loading_editor = True
+        try:
+            if 0 <= index < len(self._sources):
+                source = self._sources[index]
+                self.editor.setEnabled(True)
+                self.editor.setPlainText(source.text)
+                self.editor_title.setText(f"NC 程序内容（可直接修改）：{source.source_path.name}")
+            else:
+                self.editor.clear()
+                self.editor.setEnabled(False)
+                self.editor_title.setText("NC 程序内容（可直接手动修改）")
+        finally:
+            self._loading_editor = False
+
+    def _store_editor_text(self) -> None:
+        if not self._loading_editor and 0 <= self._active_index < len(self._sources):
+            self._sources[self._active_index].text = self.editor.toPlainText()
+
+    def apply_conversion(self) -> None:
+        self._store_editor_text()
+        if not self._sources:
+            QMessageBox.information(self, "请先导入", "请拖入、选择或粘贴至少一个 NC 程序。")
+            return
+        converted: list[ConversionResult] = []
+        failures: list[str] = []
+        for source in self._sources:
+            try:
+                target = transform_file(source.source_path, self.mode, source_text=source.text)
+                if target.is_file():
+                    converted.append(
+                        ConversionResult(
+                            source.source_path,
+                            target.resolve(),
+                            source.text if self.mode is TransformMode.M06 else None,
+                        )
+                    )
+                else:
+                    failures.append(f"{source.source_path.name}：该文件不符合当前快捷方式的处理规则。")
+            except Exception as exc:
+                failures.append(f"{source.source_path.name}：{exc}")
+        if not converted:
+            detail = "\n".join(failures) or "没有符合当前快捷方式规则的 NC 文件。"
+            QMessageBox.warning(self, "没有可处理的文件", detail)
+            return
+        self.converted_files = converted
+        if failures:
+            QMessageBox.warning(
+                self,
+                "部分程序修改失败",
+                "以下程序未能完成修改；已成功修改的程序会继续自动填写到程序单：\n\n" + "\n".join(failures),
+            )
+        self.accept()
+
+
+class NcSourceEditorDialog(QDialog):
+    """Manual source editor opened from the main imported-file list."""
+
+    def __init__(self, source_path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.source_path = source_path
+        self.setWindowTitle(f"编辑 NC 程序：{source_path.name}")
+        self.resize(900, 620)
+        root = QVBoxLayout(self)
+        root.addWidget(QLabel(f"正在编辑：{source_path}\n保存会直接覆盖该 NC 程序文件。"))
+        self.editor = QPlainTextEdit()
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.original_text = decode_windows_default(source_path.read_bytes())
+        self.did_change = False
+        self.editor.setPlainText(self.original_text)
+        root.addWidget(self.editor, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.save_source)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def save_source(self) -> None:
+        self.did_change = self.editor.toPlainText() != self.original_text
+        if not self.did_change:
+            self.accept()
+            return
+        try:
+            self.source_path.write_bytes(encode_windows_default(self.editor.toPlainText()))
+        except Exception as exc:
+            QMessageBox.critical(self, "无法保存 NC 程序", str(exc))
+            return
+        self.accept()
 
 
 class FloatingImageOverlay(QWidget):
@@ -832,6 +1202,14 @@ class MainWindow(QMainWindow):
         # is exported as red text in column B. It stays separate from parsed
         # records so it cannot be mistaken for an NC source during reparse.
         self.row_markers: dict[int, str] = {}
+        # UI-only labels showing which legacy shortcut modified a source. They
+        # never alter the program name written into the Excel template.
+        self.conversion_tags: dict[Path, str] = {}
+        # The M06 shortcut intentionally removes the controller's tool-change
+        # boundaries. Keep the reviewed pre-conversion text only for this
+        # session so a multi-tool program still has one program-sheet row per
+        # tool after the exact source-file conversion.
+        self.m06_parse_snapshots: dict[Path, str] = {}
         self.manual_cells: dict[str, str] = {}
         self.image_placements: list[ImagePlacement] = []
         self.template_path: Path | None = None
@@ -871,13 +1249,18 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
-        insert_image = QPushButton("插入图片")
-        insert_image.clicked.connect(self.insert_image)
-        insert_image.setToolTip("选择图片文件；也可在右侧预览选中单元格后按 Ctrl+V 粘贴截图或图片。插入后可直接拖动、缩放。")
-        toolbar.addWidget(insert_image)
-        remove_image = QPushButton("删除图片")
-        remove_image.clicked.connect(self.remove_images_at_selected_cell)
-        toolbar.addWidget(remove_image)
+        m06 = QPushButton("M06")
+        m06.clicked.connect(lambda: self.open_conversion_dialog(TransformMode.M06))
+        m06.setToolTip("按原 M6 快捷方式修改 NC 程序，并自动填写程序单")
+        toolbar.addWidget(m06)
+        m304 = QPushButton("M304")
+        m304.clicked.connect(lambda: self.open_conversion_dialog(TransformMode.M304))
+        m304.setToolTip("按原 M304 快捷方式修改 NC 程序，并自动填写程序单")
+        toolbar.addWidget(m304)
+        copper = QPushButton("铜工")
+        copper.clicked.connect(lambda: self.open_conversion_dialog(TransformMode.COPPER))
+        copper.setToolTip("按原铜工快捷方式修改 NC 程序，并自动填写程序单")
+        toolbar.addWidget(copper)
         add_files = QPushButton("选择 NC 文件")
         add_files.clicked.connect(self.choose_nc_files)
         toolbar.addWidget(add_files)
@@ -903,9 +1286,10 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QLabel("已导入 NC 文件"))
+        left_layout.addWidget(QLabel("已导入 NC 文件（双击可查看和手动修改程序）"))
         self.file_list = QListWidget()
         self.file_list.setMinimumWidth(265)
+        self.file_list.itemDoubleClicked.connect(self.edit_imported_nc_file)
         left_layout.addWidget(self.file_list, 2)
         left_layout.addWidget(QLabel("解析结果（可直接修改）"))
         self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
@@ -947,6 +1331,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             "QWidget { font-family: 'Microsoft YaHei UI', Arial; font-size: 12px; }"
             "#dropArea { border: 2px dashed #4b87b9; border-radius: 8px; background: #edf6fd; color: #245b85; font-size: 15px; }"
+            "#conversionDropArea { border: 2px dashed #79a9cf; border-radius: 7px; background: #edf6fd; color: #245b85; font-size: 13px; }"
             "#primaryButton { background: #0f6cbd; color: white; font-weight: 600; padding: 6px 15px; border-radius: 4px; }"
             "#primaryButton:hover { background: #005a9e; }"
             "QTableWidget { gridline-color: #d4dbe2; }"
@@ -1161,6 +1546,138 @@ class MainWindow(QMainWindow):
         )
         self.add_nc_files([Path(filename) for filename in filenames])
 
+    def open_conversion_dialog(self, mode: TransformMode) -> None:
+        """Open one legacy-shortcut-compatible conversion page.
+
+        The dialog is intentionally the only place where a conversion writes
+        to an NC source.  Once it returns successfully, the resulting file is
+        parsed through the same conservative parser as a normally dropped
+        program, so the existing program-sheet mapping remains unchanged.
+        """
+
+        dialog = NcConversionDialog(mode, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._import_converted_files(dialog.converted_files, mode)
+
+    def _import_converted_files(self, converted_files: list[ConversionResult], mode: TransformMode) -> None:
+        """Parse shortcut outputs and retain their pale-blue source labels.
+
+        A transformed source may already be present in the program sheet.  In
+        that case we replace only its existing rows in place rather than
+        shifting the operator's later rows, inserted blanks, images or manual
+        edits.  For M06, the reviewed pre-conversion snapshot retains the
+        original tool-change boundaries for multi-tool program-sheet rows,
+        while the disk file itself remains the exact shortcut output.
+        """
+
+        parsed_by_target: list[tuple[Path, Path, list[ProgramRecord], str | None]] = []
+        for conversion in converted_files:
+            source = conversion.source_path.resolve()
+            target = conversion.target_path.resolve()
+            try:
+                if mode is TransformMode.M06 and conversion.parser_snapshot is not None:
+                    parsed = apply_tool_number_display_policy(
+                        parse_records_text(conversion.parser_snapshot, target.name, target)
+                    )
+                else:
+                    parsed = apply_tool_number_display_policy(parse_file_records(target))
+            except Exception as exc:
+                self.show_error("NC 文件解析失败", f"{target.name}\n\n{exc}")
+                continue
+            parsed_by_target.append((source, target, parsed, conversion.parser_snapshot))
+
+        if not parsed_by_target:
+            return
+
+        overflow_records: list[ProgramRecord] = []
+        added_count = 0
+        for source, target, parsed_records, parser_snapshot in parsed_by_target:
+            # The converted output is the only source that should retain the
+            # mode label. Copper conversion has a different, extensionless
+            # output path, so remove the now-deleted .NC path from the map.
+            self.conversion_tags.pop(source, None)
+            self.conversion_tags[target] = CONVERSION_TAGS[mode]
+            if mode is TransformMode.M06 and parser_snapshot is not None:
+                self.m06_parse_snapshots[target] = parser_snapshot
+            else:
+                # A later M304/copper operation means the current disk source
+                # is now authoritative, so an older M06 split snapshot must
+                # not be reused.
+                self.m06_parse_snapshots.pop(target, None)
+            if source != target:
+                self.m06_parse_snapshots.pop(source, None)
+
+            existing_indices = [
+                index
+                for index, record in enumerate(self.records)
+                if record is not None and record.source_path.resolve() in {source, target}
+            ]
+            if existing_indices:
+                for position, index in enumerate(existing_indices):
+                    self.records[index] = parsed_records[position] if position < len(parsed_records) else None
+                    if position >= len(parsed_records):
+                        # An old tool section disappeared during conversion;
+                        # preserve the row position as a deliberate blank.
+                        self.row_markers.pop(index, None)
+
+                extra_records = parsed_records[len(existing_indices) :]
+                free_rows = LAYOUT.capacity - len(self.records)
+                if extra_records and free_rows > 0:
+                    self.records.extend(extra_records[:free_rows])
+                    added_count += min(len(extra_records), free_rows)
+                overflow_records.extend(extra_records[free_rows:])
+                continue
+
+            # This source was not already in the sheet. Append its parsed
+            # rows in the same way as an ordinary drop, retaining the dialog's
+            # natural filename ordering.
+            free_rows = LAYOUT.capacity - len(self.records)
+            if free_rows > 0:
+                self.records.extend(parsed_records[:free_rows])
+                added_count += min(len(parsed_records), free_rows)
+            overflow_records.extend(parsed_records[free_rows:])
+
+        if overflow_records:
+            self.show_capacity_overflow(overflow_records)
+        self._sort_records_by_program_name_if_safe()
+        self._apply_records_to_view()
+        converted_names = "、".join(target.name for _, target, _, _ in parsed_by_target[:4])
+        remaining = len(parsed_by_target) - 4
+        if remaining > 0:
+            converted_names += f" 等 {len(parsed_by_target)} 个文件"
+        if added_count:
+            self.statusBar().showMessage(f"已按原 {CONVERSION_TAGS[mode]} 快捷方式修改并导入：{converted_names}", 5000)
+        else:
+            self.statusBar().showMessage(f"已按原 {CONVERSION_TAGS[mode]} 快捷方式修改并重新解析：{converted_names}", 5000)
+
+    def edit_imported_nc_file(self, item: QListWidgetItem) -> None:
+        """Let an operator inspect and edit the source behind a list entry."""
+
+        source_value = item.data(Qt.ItemDataRole.UserRole)
+        if not source_value:
+            return
+        source_path = Path(str(source_value))
+        if not source_path.is_file():
+            self.show_error(
+                "找不到 NC 程序",
+                f"{source_path}\n\n该文件可能已被外部移动或删除。请重新导入正确的 NC 文件。",
+            )
+            return
+        try:
+            dialog = NcSourceEditorDialog(source_path, self)
+        except Exception as exc:
+            self.show_error("无法打开 NC 程序", f"{source_path.name}\n\n{exc}")
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.did_change:
+                # A changed M06 output no longer has reliably recoverable
+                # original section boundaries, so parse the edited source as
+                # it now exists on disk rather than ignoring the edit.
+                self.m06_parse_snapshots.pop(source_path.resolve(), None)
+            self.reparse()
+            self.statusBar().showMessage(f"已保存并重新解析：{source_path.name}", 4500)
+
     def dragEnterEvent(self, event: Any) -> None:  # Qt event type differs across bindings
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
         if any(is_supported_nc_file(Path(url.toLocalFile())) for url in urls):
@@ -1178,6 +1695,47 @@ class MainWindow(QMainWindow):
 
     def _has_imported_records(self) -> bool:
         return any(record is not None for record in self.records)
+
+    def _sort_records_by_program_name_if_safe(self) -> bool:
+        """Keep ordinary imports in natural filename order without moving edits.
+
+        The first import and a plain conversion can safely be re-ordered.  Once
+        an operator has inserted a spacer/marker, added an image, or typed a
+        value that is not represented by its ``ProgramRecord``, preserving the
+        existing physical rows is safer than silently moving their work.
+        """
+
+        if len(self.records) < 2 or any(record is None for record in self.records):
+            return False
+        if self.row_markers or self.image_placements:
+            return False
+        automatic = automatic_cells_for_rows(self.records)
+        for coordinate, value in self.manual_cells.items():
+            row_text = "".join(character for character in coordinate if character.isdigit())
+            if not row_text:
+                continue
+            row = int(row_text)
+            if not LAYOUT.first_program_row <= row <= LAYOUT.last_program_row:
+                continue
+            expected = automatic.get(coordinate)
+            if expected is None:
+                if value:
+                    return False
+            # A blank is also how the standard program-area reset represents
+            # a newly added row before `_apply_records_to_view` populates it.
+            # Non-blank differences are the meaningful operator edits that
+            # must keep their current row position.
+            elif value and value != expected:
+                return False
+
+        sorted_records = sorted(
+            (record for record in self.records if record is not None),
+            key=lambda record: (natural_program_sort_key(record.program_name), record.source_tool_index),
+        )
+        if list(self.records) == sorted_records:
+            return False
+        self.records = sorted_records
+        return True
 
     def _has_tracked_data(self, index: int) -> bool:
         """Whether moving this program row would discard a user-entered value."""
@@ -1364,6 +1922,7 @@ class MainWindow(QMainWindow):
                 self.show_error("NC 文件解析失败", f"{path.name}\n\n{exc}")
         if overflow_records:
             self.show_capacity_overflow(overflow_records)
+        self._sort_records_by_program_name_if_safe()
         self._apply_records_to_view()
 
     def show_capacity_overflow(self, overflow_records: list[ProgramRecord]) -> None:
@@ -1398,7 +1957,13 @@ class MainWindow(QMainWindow):
             source = record.source_path.resolve()
             if source not in refreshed_by_path:
                 try:
-                    refreshed_by_path[source] = apply_tool_number_display_policy(parse_file_records(record.source_path))
+                    snapshot = self.m06_parse_snapshots.get(source)
+                    if snapshot is not None:
+                        refreshed_by_path[source] = apply_tool_number_display_policy(
+                            parse_records_text(snapshot, record.source_path.name, record.source_path)
+                        )
+                    else:
+                        refreshed_by_path[source] = apply_tool_number_display_policy(parse_file_records(record.source_path))
                 except Exception as exc:
                     refreshed_by_path[source] = [
                         ProgramRecord(
@@ -1435,6 +2000,8 @@ class MainWindow(QMainWindow):
             return
         self.records.clear()
         self.row_markers.clear()
+        self.conversion_tags.clear()
+        self.m06_parse_snapshots.clear()
         self.manual_cells.clear()
         self.image_placements.clear()
         self._program_area_reset = False
@@ -1451,9 +2018,24 @@ class MainWindow(QMainWindow):
         self.file_list.clear()
         listed_sources: set[Path] = set()
         for record in self.records:
-            if record is not None and record.source_path.resolve() not in listed_sources:
-                self.file_list.addItem(record.program_name)
-                listed_sources.add(record.source_path.resolve())
+            if record is None:
+                continue
+            source = record.source_path.resolve()
+            if source in listed_sources:
+                continue
+            item = QListWidgetItem(record.program_name)
+            item.setData(Qt.ItemDataRole.UserRole, str(source))
+            item.setToolTip(f"双击查看和手动修改 NC 程序：\n{source}")
+            conversion_tag = self.conversion_tags.get(source)
+            if conversion_tag:
+                item.setText(f"{conversion_tag}    {record.program_name}")
+                item.setBackground(CONVERSION_TAG_BACKGROUND)
+                item.setForeground(CONVERSION_TAG_FOREGROUND)
+                item_font = item.font()
+                item_font.setBold(True)
+                item.setFont(item_font)
+            self.file_list.addItem(item)
+            listed_sources.add(source)
         # The supplied workbook contains filled reference rows. On the first
         # import, blank only the NC-generated fields across the program area so
         # old sample entries cannot leak into the exported sheet.
