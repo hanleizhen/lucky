@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import copy
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -169,6 +170,7 @@ def export_workbook(
     target_path: str | Path,
     cell_values: Mapping[str, str],
     images: Sequence[ImagePlacement] = (),
+    red_text_cells: Sequence[str] = (),
 ) -> None:
     """Create a new workbook. The source template is opened read-only in spirit and never saved."""
 
@@ -185,6 +187,14 @@ def export_workbook(
             if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*", cell):
                 raise TemplateError(f"无效的单元格地址：{cell}")
             sheet[cell] = value
+        for cell in red_text_cells:
+            if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*", cell):
+                raise TemplateError(f"无效的单元格地址：{cell}")
+            # Keep every template font property (family, size, borders and
+            # alignment) and change only the instruction text to red.
+            font = copy(sheet[cell].font)
+            font.color = "FFFF0000"
+            sheet[cell].font = font
         for placement in images:
             if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*", placement.anchor):
                 raise TemplateError(f"图片的单元格地址无效：{placement.anchor}")

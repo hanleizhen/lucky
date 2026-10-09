@@ -82,6 +82,8 @@ RESULT_COLUMNS: list[tuple[str, str]] = [
 ]
 FIELD_NAMES = {field for _, field in RESULT_COLUMNS if field != "status"}
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+ROTATION_MARKERS = ("❮Y⟲180°❯", "❮X⟲180°❯", "❮Z⟲180°❯")
+MARKER_RED = QColor("#FF0000")
 
 
 def natural_program_sort_key(name: str) -> tuple[object, ...]:
@@ -140,6 +142,21 @@ def is_supported_nc_file(path: Path) -> bool:
     """
 
     return path.is_file() and (path.suffix.lower() == ".nc" or not path.suffix)
+
+
+def apply_tool_number_display_policy(records: list[ProgramRecord]) -> list[ProgramRecord]:
+    """Hide T numbers for ordinary .NC files, retain them for copper programs.
+
+    The supplied program-sheet convention uses the T column only for
+    controller programs that have no filename suffix.  The parser still reads
+    the tool number in both cases; this presentation policy is applied only
+    after parsing, so it never weakens NC recognition.
+    """
+
+    for record in records:
+        if record.source_path.suffix.casefold() == ".nc":
+            record.tool_number = ""
+    return records
 
 
 class Worker(QThread):
@@ -345,6 +362,7 @@ class ExcelPreview(QTableWidget):
 
     cell_edited = Signal(str, str)
     insert_blank_row_requested = Signal(int)
+    insert_marker_row_requested = Signal(int, str)
     remove_blank_row_requested = Signal(int)
     clipboard_image_paste_requested = Signal()
     clipboard_nc_paste_requested = Signal()
@@ -389,9 +407,18 @@ class ExcelPreview(QTableWidget):
             return
         self.setCurrentCell(index.row(), index.column())
         menu = QMenu(self)
-        insert = menu.addAction("在下方插入空行")
+        menu.setStyleSheet("QMenu::item { color: #d00000; font-weight: 600; }")
+        menu.addSection("在下方插入")
+        insert = menu.addAction("1. 空行")
         insert.setEnabled(index.row() < LAYOUT.last_program_row - 1)
         insert.triggered.connect(lambda: self.insert_blank_row_requested.emit(index.row() + 1))
+        for sequence, marker in enumerate(ROTATION_MARKERS, start=2):
+            action = menu.addAction(f"{sequence}. {marker}（红色提示行）")
+            action.setEnabled(index.row() < LAYOUT.last_program_row - 1)
+            action.triggered.connect(
+                lambda checked=False, marker_text=marker: self.insert_marker_row_requested.emit(index.row() + 1, marker_text)
+            )
+        menu.addSeparator()
         remove = menu.addAction("取消空行（也可按 Delete）")
         remove.triggered.connect(lambda: self.remove_blank_row_requested.emit(index.row()))
         menu.exec(self.viewport().mapToGlobal(position))
@@ -591,6 +618,18 @@ class ExcelPreview(QTableWidget):
         item.setText(value)
         self._loading = False
 
+    def set_text_color(self, cell: str, color: QColor) -> None:
+        """Change a preview cell's text color without replacing its style."""
+
+        column_letters = "".join(character for character in cell if character.isalpha())
+        row_number = int("".join(character for character in cell if character.isdigit()))
+        column = 0
+        for character in column_letters:
+            column = column * 26 + ord(character) - 64
+        item = self.item(row_number - 1, column - 1)
+        if item is not None:
+            item.setForeground(color)
+
     def current_coordinate(self) -> str | None:
         """Return the selected Excel coordinate, including merged-cell roots."""
 
@@ -750,6 +789,34 @@ class SettingsDialog(QDialog):
         form.addRow(buttons)
 
 
+class SaveDirectoryDialog(QDialog):
+    """Choose the persistent folder used by the save button."""
+
+    def __init__(self, current_directory: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("设置程序单保存位置")
+        self.directory = QLineEdit(str(current_directory))
+        browse = QPushButton("选择文件夹")
+        browse.clicked.connect(self._browse)
+        row = QHBoxLayout()
+        row.addWidget(self.directory, 1)
+        row.addWidget(browse)
+        form = QFormLayout(self)
+        form.addRow("固定保存文件夹：", row)
+        note = QLabel("首次保存后会记住此位置。以后每次点击“完成并保存”都会保存到这里；可随时用“保存位置”修改。")
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _browse(self) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "选择程序单保存文件夹", self.directory.text())
+        if selected:
+            self.directory.setText(selected)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -758,6 +825,10 @@ class MainWindow(QMainWindow):
         # Keeping it in the row list means programs below the spacer retain
         # their exact Excel row when the workbook is exported.
         self.records: list[ProgramRecord | None] = []
+        # A marker takes a normal program row, shifts following data down and
+        # is exported as red text in column B. It stays separate from parsed
+        # records so it cannot be mistaken for an NC source during reparse.
+        self.row_markers: dict[int, str] = {}
         self.manual_cells: dict[str, str] = {}
         self.image_placements: list[ImagePlacement] = []
         self.template_path: Path | None = None
@@ -784,6 +855,10 @@ class MainWindow(QMainWindow):
         self.save_button.setObjectName("primaryButton")
         self.save_button.clicked.connect(self.save_output)
         toolbar.addWidget(self.save_button)
+        save_location = QPushButton("保存位置")
+        save_location.clicked.connect(self.configure_save_directory)
+        save_location.setToolTip("设置“完成并保存”固定使用的文件夹")
+        toolbar.addWidget(save_location)
         reparse = QPushButton("重新解析")
         reparse.clicked.connect(self.reparse)
         toolbar.addWidget(reparse)
@@ -848,6 +923,7 @@ class MainWindow(QMainWindow):
         self.preview.setObjectName("excelPreview")
         self.preview.cell_edited.connect(self._on_preview_edited)
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
+        self.preview.insert_marker_row_requested.connect(self.insert_marker_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
         self.preview.clipboard_image_paste_requested.connect(self.paste_image_from_clipboard)
         self.preview.clipboard_nc_paste_requested.connect(self.paste_nc_from_clipboard)
@@ -1117,6 +1193,23 @@ class MainWindow(QMainWindow):
             for placement in self.image_placements
         )
 
+    def _has_only_marker_data(self, index: int) -> bool:
+        """Whether a marker row has no extra operator-entered cells."""
+
+        marker = self.row_markers.get(index)
+        if marker is None:
+            return False
+        marker_cell = LAYOUT.target_cell("program_name", index)
+        excel_row = LAYOUT.first_program_row + index
+        for column in range(2, self.preview.columnCount() + 1):
+            coordinate = f"{ExcelPreview._column_name(column)}{excel_row}"
+            value = self.manual_cells.get(coordinate, "")
+            if coordinate == marker_cell and value == marker:
+                continue
+            if value:
+                return False
+        return True
+
     def _shift_program_images(self, start_index: int, direction: int) -> None:
         """Keep image anchors aligned when a logical program row moves."""
 
@@ -1165,19 +1258,33 @@ class MainWindow(QMainWindow):
             self.manual_cells.pop(coordinate, None)
         self.manual_cells.update(moved)
 
-    def insert_blank_program_row(self, table_row: int) -> None:
-        """Insert an empty logical row below the selected preview row."""
+    def _shift_marker_rows_for_insert(self, index: int) -> None:
+        self.row_markers = {
+            row_index + 1 if row_index >= index else row_index: marker
+            for row_index, marker in self.row_markers.items()
+            if row_index + 1 < LAYOUT.capacity or row_index < index
+        }
+
+    def _shift_marker_rows_for_remove(self, index: int) -> None:
+        self.row_markers = {
+            row_index - 1 if row_index > index else row_index: marker
+            for row_index, marker in self.row_markers.items()
+            if row_index != index
+        }
+
+    def _insert_program_row(self, table_row: int, marker: str | None = None) -> None:
+        """Insert either a blank row or a red machining-orientation marker."""
 
         index = self._program_row_index(table_row)
         if index is None:
             return
         if not self._has_imported_records():
-            self.statusBar().showMessage("请先导入 NC 程序，再插入程序单空行。", 3500)
+            self.statusBar().showMessage("请先导入 NC 程序，再插入程序单行。", 3500)
             return
         if self._has_tracked_data(LAYOUT.capacity - 1) or self._has_image_at_program_index(LAYOUT.capacity - 1) or (
             len(self.records) == LAYOUT.capacity and self.records[-1] is not None
         ):
-            self.show_error("无法插入空行", "模板最后一行已有数据。请先腾出最后一个程序行，避免覆盖数据。")
+            self.show_error("无法插入程序行", "模板最后一行已有数据。请先腾出最后一个程序行，避免覆盖数据。")
             return
         # A row below the final imported program can still be selected in the
         # preview. Preserve its requested position by representing preceding
@@ -1186,12 +1293,30 @@ class MainWindow(QMainWindow):
             self.records.append(None)
         if len(self.records) == LAYOUT.capacity:
             self.records.pop()
+            self.row_markers.pop(LAYOUT.capacity - 1, None)
         self.preview.shift_program_row_values(table_row, 1)
         self._shift_tracked_program_cells(index, 1)
         self._shift_program_images(index, 1)
+        self._shift_marker_rows_for_insert(index)
         self.records.insert(index, None)
+        if marker:
+            self.row_markers[index] = marker
         self._apply_records_to_view()
-        self.statusBar().showMessage("已在所选行下方插入空行；选中该空行后按 Delete 可取消。", 4500)
+        if marker:
+            self.statusBar().showMessage(f"已在所选行下方插入红色提示行：{marker}。选中该行后按 Delete 可取消。", 4500)
+        else:
+            self.statusBar().showMessage("已在所选行下方插入空行；选中该空行后按 Delete 可取消。", 4500)
+
+    def insert_blank_program_row(self, table_row: int) -> None:
+        """Insert an empty logical row below the selected preview row."""
+
+        self._insert_program_row(table_row)
+
+    def insert_marker_program_row(self, table_row: int, marker: str) -> None:
+        if marker not in ROTATION_MARKERS:
+            self.show_error("无法插入提示行", "提示行内容无效。")
+            return
+        self._insert_program_row(table_row, marker)
 
     def remove_blank_program_row(self, table_row: int) -> None:
         """Remove an operator-inserted empty row and close the gap."""
@@ -1200,15 +1325,17 @@ class MainWindow(QMainWindow):
         if index is None or index >= len(self.records) or self.records[index] is not None:
             self.statusBar().showMessage("请选择通过“插入空行”创建的空白程序行，再按 Delete。", 4000)
             return
-        if self._has_tracked_data(index) or self._has_image_at_program_index(index):
+        has_extra_data = self._has_tracked_data(index) and not self._has_only_marker_data(index)
+        if has_extra_data or self._has_image_at_program_index(index):
             self.statusBar().showMessage("该行已有手动填写内容或图片，无法作为空行取消。请先清空该行内容。", 4000)
             return
         self.preview.shift_program_row_values(table_row, -1)
         self._shift_tracked_program_cells(index, -1)
         self._shift_program_images(index, -1)
+        self._shift_marker_rows_for_remove(index)
         self.records.pop(index)
         self._apply_records_to_view()
-        self.statusBar().showMessage("已取消空行，后续程序数据已上移。", 3500)
+        self.statusBar().showMessage("已取消空行或提示行，后续程序数据已上移。", 3500)
 
     def add_nc_files(self, paths: list[Path]) -> None:
         paths = [path for path in paths if is_supported_nc_file(path)]
@@ -1222,7 +1349,7 @@ class MainWindow(QMainWindow):
             if path.resolve() in existing:
                 continue
             try:
-                parsed_records = parse_file_records(path)
+                parsed_records = apply_tool_number_display_policy(parse_file_records(path))
                 free_rows = LAYOUT.capacity - len(self.records)
                 if free_rows <= 0:
                     overflow_records.extend(parsed_records)
@@ -1239,7 +1366,7 @@ class MainWindow(QMainWindow):
     def show_capacity_overflow(self, overflow_records: list[ProgramRecord]) -> None:
         """Name every omitted program row and give a safe continuation path."""
 
-        labels = [f"{record.program_name}（{record.tool_number}）" for record in overflow_records]
+        labels = [f"{record.program_name}{f'（{record.tool_number}）' if record.tool_number else ''}" for record in overflow_records]
         preview_labels = labels[:20]
         displayed = "\n".join(f"• {label}" for label in preview_labels)
         if len(labels) > len(preview_labels):
@@ -1268,7 +1395,7 @@ class MainWindow(QMainWindow):
             source = record.source_path.resolve()
             if source not in refreshed_by_path:
                 try:
-                    refreshed_by_path[source] = parse_file_records(record.source_path)
+                    refreshed_by_path[source] = apply_tool_number_display_policy(parse_file_records(record.source_path))
                 except Exception as exc:
                     refreshed_by_path[source] = [
                         ProgramRecord(
@@ -1295,6 +1422,7 @@ class MainWindow(QMainWindow):
                         warnings=["重新解析后未找到对应刀具段"],
                     )
                 )
+        apply_tool_number_display_policy([record for record in refreshed if record is not None])
         self.records = refreshed
         self._apply_records_to_view()
         self.statusBar().showMessage("已按原始 NC 文件重新解析。", 3500)
@@ -1303,6 +1431,7 @@ class MainWindow(QMainWindow):
         if self._has_imported_records() and QMessageBox.question(self, "清空", "清空已导入文件及当前预览中的手动修改？") != QMessageBox.StandardButton.Yes:
             return
         self.records.clear()
+        self.row_markers.clear()
         self.manual_cells.clear()
         self.image_placements.clear()
         self._program_area_reset = False
@@ -1340,6 +1469,15 @@ class MainWindow(QMainWindow):
         self.manual_cells.update(automatic)
         for cell, value in {**automatic_area, **automatic}.items():
             self.preview.set_value(cell, value)
+        # Normal data returns to the template's black text. Marker cells are
+        # reapplied below in red after automatic values have cleared the area.
+        for index in range(LAYOUT.capacity):
+            self.preview.set_text_color(LAYOUT.target_cell("program_name", index), QColor("#000000"))
+        for index, marker in self.row_markers.items():
+            coordinate = LAYOUT.target_cell("program_name", index)
+            self.manual_cells[coordinate] = marker
+            self.preview.set_value(coordinate, marker)
+            self.preview.set_text_color(coordinate, MARKER_RED)
         self._set_result_table()
 
     def _set_result_table(self) -> None:
@@ -1348,7 +1486,13 @@ class MainWindow(QMainWindow):
         for row, record in enumerate(self.records):
             for column, (_, field) in enumerate(RESULT_COLUMNS):
                 if record is None:
-                    value = "空行（预览中按 Delete 取消）" if field == "status" else ""
+                    marker = self.row_markers.get(row)
+                    if field == "program_name" and marker:
+                        value = marker
+                    elif field == "status":
+                        value = "红色提示行（预览中按 Delete 取消）" if marker else "空行（预览中按 Delete 取消）"
+                    else:
+                        value = ""
                 else:
                     value = record.status if field == "status" else str(getattr(record, field))
                 item = QTableWidgetItem(value)
@@ -1356,6 +1500,8 @@ class MainWindow(QMainWindow):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if record is not None and record.has_unrecognized_values:
                         item.setForeground(QColor("#a15c00"))
+                    elif record is None and self.row_markers.get(row):
+                        item.setForeground(MARKER_RED)
                 self.result_table.setItem(row, column, item)
         self.result_table.resizeColumnsToContents()
         self._result_loading = False
@@ -1376,6 +1522,18 @@ class MainWindow(QMainWindow):
 
     def _on_preview_edited(self, cell: str, value: str) -> None:
         self.manual_cells[cell] = value
+        if cell.startswith("B"):
+            row_text = "".join(character for character in cell if character.isdigit())
+            index = int(row_text) - LAYOUT.first_program_row if row_text else -1
+            if index in self.row_markers:
+                if value:
+                    self.row_markers[index] = value
+                    self.preview.set_text_color(cell, MARKER_RED)
+                else:
+                    self.row_markers.pop(index, None)
+                    self.preview.set_text_color(cell, QColor("#000000"))
+                self._set_result_table()
+                return
         for index, record in enumerate(self.records):
             if record is None:
                 continue
@@ -1458,6 +1616,49 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.show_error("无法启动更新安装程序", str(exc))
 
+    @staticmethod
+    def _default_save_directory() -> Path:
+        """Return Desktop only as the initial suggestion, never as a forced path."""
+
+        from PySide6.QtCore import QStandardPaths
+
+        desktop_text = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        if desktop_text:
+            return Path(desktop_text)
+        return Path(os.path.expanduser("~")) / "Desktop"
+
+    def _configured_save_directory(self) -> Path | None:
+        configured = str(self.settings.get("output_directory", "")).strip()
+        if not configured:
+            return None
+        directory = Path(configured).expanduser()
+        return directory if directory.is_dir() else None
+
+    def configure_save_directory(self) -> Path | None:
+        """Ask once for a persistent, user-owned generated-sheet directory."""
+
+        current_directory = self._configured_save_directory() or self._default_save_directory()
+        dialog = SaveDirectoryDialog(current_directory, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        raw_directory = dialog.directory.text().strip()
+        if not raw_directory:
+            self.show_error("未设置保存位置", "请输入或选择一个程序单保存文件夹。")
+            return None
+        directory = Path(raw_directory).expanduser()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.show_error("无法创建保存文件夹", str(exc))
+            return None
+        if not directory.is_dir():
+            self.show_error("无法设置保存位置", f"该位置不是文件夹：{directory}")
+            return None
+        self.settings["output_directory"] = str(directory)
+        save_settings(self.settings)
+        self.statusBar().showMessage(f"已设置固定保存位置：{directory}", 5000)
+        return directory
+
     def _validate_before_save(self) -> bool:
         if not self._has_imported_records():
             self.show_error("无法保存", "请先拖入或选择至少一个 NC 程序。")
@@ -1475,20 +1676,24 @@ class MainWindow(QMainWindow):
         return True
 
     def save_output(self) -> None:
-        if not self.template_path or not self._validate_before_save():
+        if not self.template_path:
+            return
+        # On a fresh installation there is no saved folder, so the first
+        # press of “完成并保存” prompts for it exactly once.
+        output_directory = self._configured_save_directory() or self.configure_save_directory()
+        if output_directory is None or not self._validate_before_save():
             return
         try:
             # Ensure table edits are applied even when a preview cell was never clicked.
             self.manual_cells.update(automatic_cells_for_rows(self.records))
-            desktop = Path(os.path.join(os.path.expanduser("~"), "Desktop"))
-            # QStandardPaths is more reliable with redirected Windows desktops.
-            from PySide6.QtCore import QStandardPaths
-
-            desktop_text = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
-            if desktop_text:
-                desktop = Path(desktop_text)
-            target = output_filename([record for record in self.records if record is not None], desktop)
-            export_workbook(self.template_path, target, self.manual_cells, images=self.image_placements)
+            target = output_filename([record for record in self.records if record is not None], output_directory)
+            export_workbook(
+                self.template_path,
+                target,
+                self.manual_cells,
+                images=self.image_placements,
+                red_text_cells=[LAYOUT.target_cell("program_name", index) for index in self.row_markers],
+            )
             self._show_save_success(target)
         except Exception as exc:
             self.show_error("保存程序单失败", str(exc))

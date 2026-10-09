@@ -54,6 +54,39 @@ def test_insert_then_delete_blank_program_row_preserves_export_order(tmp_path: P
     assert app is not None
 
 
+def test_insert_rotation_marker_is_red_and_exports_as_a_red_instruction(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    template = Path("assets/CNC程序单.xlsx")
+    window.load_template(template)
+    window.records = [_record("O-1.NC"), _record("O-2.NC")]
+    window._apply_records_to_view()
+
+    window.insert_marker_program_row(7, "❮Y⟲180°❯")
+
+    assert [record.program_name if record else None for record in window.records] == ["O-1.NC", None, "O-2.NC"]
+    assert window.row_markers == {1: "❮Y⟲180°❯"}
+    preview_marker = window.preview.item(7, 1)
+    assert preview_marker.text() == "❮Y⟲180°❯"
+    assert preview_marker.foreground().color().name() == "#ff0000"
+
+    output = tmp_path / "marker.xlsx"
+    export_workbook(template, output, window.manual_cells, red_text_cells=["B8"])
+    workbook = load_workbook(output, data_only=False)
+    try:
+        cell = workbook["Sheet1"]["B8"]
+        assert cell.value == "❮Y⟲180°❯"
+        assert cell.font.color is not None and cell.font.color.rgb == "FFFF0000"
+    finally:
+        workbook.close()
+
+    window.remove_blank_program_row(7)
+    assert [record.program_name if record else None for record in window.records] == ["O-1.NC", "O-2.NC"]
+    assert window.row_markers == {}
+    window.close()
+    assert app is not None
+
+
 def test_multi_tool_import_with_available_capacity_does_not_report_negative_overflow(tmp_path: Path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "0505.NC"
