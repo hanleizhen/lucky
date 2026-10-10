@@ -1,5 +1,6 @@
 """Single source of truth for the application version."""
 
-__version__ = "1.1.16"
-APP_NAME = "CNC程序单自动生成工具"
+__version__ = "1.1.17"
+APP_NAME = "CNC 智能程序单"
+APP_ICON_FILE = "cnc_smart_sheet_icon.ico"
 

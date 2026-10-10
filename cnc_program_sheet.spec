@@ -8,6 +8,7 @@ project = Path.cwd().resolve()
 datas = [
     (str(project / "assets" / "CNC程序单.xlsx"), "assets"),
     (str(project / "assets" / "update_source.json"), "assets"),
+    (str(project / "assets" / "cnc_smart_sheet_icon.ico"), "assets"),
 ]
 
 analysis = Analysis(
@@ -35,6 +36,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    icon=str(project / "assets" / "cnc_smart_sheet_icon.ico"),
     console=False,
     disable_windowed_traceback=False,
 )

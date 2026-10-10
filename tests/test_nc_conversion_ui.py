@@ -64,6 +64,23 @@ def test_m304_dialog_keeps_an_editable_source_and_applies_the_legacy_transform(t
     assert app is not None
 
 
+def test_m06_dialog_writes_windows_crlf_after_the_qt_editor_normalises_text(tmp_path: Path) -> None:
+    """Guard against QPlainTextEdit turning an imported CRLF file into LF."""
+
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "O-1.NC"
+    source.write_bytes(b"N10T1M6\r\nN20G0X0\r\nN30M3\r\n")
+    dialog = NcConversionDialog(TransformMode.M06)
+
+    dialog.add_paths([source])
+    assert dialog.editor.toPlainText() == "N10T1M6\nN20G0X0\nN30M3\n"
+    dialog.apply_conversion()
+
+    assert source.read_bytes() == b"N20G0X0\r\nN30M3\r\n"
+    dialog.close()
+    assert app is not None
+
+
 def test_converted_copper_source_is_replaced_by_suffixless_result_and_tagged(tmp_path: Path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "O0788.NC"

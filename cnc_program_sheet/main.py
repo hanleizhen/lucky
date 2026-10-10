@@ -12,7 +12,7 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -70,7 +70,7 @@ from .update_service import (
     open_release_page,
     start_installer_after_exit,
 )
-from .version import APP_NAME, __version__
+from .version import APP_ICON_FILE, APP_NAME, __version__
 
 
 RESULT_COLUMNS: list[tuple[str, str]] = [
@@ -263,7 +263,8 @@ class NcConversionDialog(QDialog):
 
     The UI deliberately stages data before the irreversible write.  The
     eventual transformation itself is delegated to ``nc_transform`` and
-    therefore preserves the historic shortcut rules exactly.
+    therefore preserves the historic shortcut rules, apart from the explicit
+    M06 Windows-CRLF output normalisation requested for this application.
     """
 
     def __init__(self, mode: TransformMode, parent: QWidget | None = None) -> None:
@@ -337,7 +338,7 @@ class NcConversionDialog(QDialog):
 
     def _notice_text(self) -> str:
         if self.mode is TransformMode.M06:
-            return "会按原 M6 快捷方式原地覆盖 .NC 文件：任何含有“ M6 ”字样的整行都会删除，不建立备份。"
+            return "会按原 M6 快捷方式原地覆盖 .NC 文件：任何含有“ M6 ”字样的整行都会删除，并统一写为 Windows CRLF 换行；不建立备份。"
         if self.mode is TransformMode.M304:
             return "会按原 M304 快捷方式原地覆盖文件：在既定 G43/M8 与 M5 位置插入指令，不建立备份。"
         return "会按原铜工快捷方式生成同名无后缀文件并删除原 .NC；安全行和 M30/M99 规则完全保持不变。"
@@ -1217,6 +1218,9 @@ class MainWindow(QMainWindow):
         self._result_loading = False
         self._update_worker: Worker | None = None
         self.setWindowTitle(f"{APP_NAME}  v{__version__}")
+        icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.setMinimumSize(1180, 720)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -2311,6 +2315,9 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("CNCProgramSheet")
+    icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     window = MainWindow()
     window.show()
     return app.exec()

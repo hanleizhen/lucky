@@ -121,13 +121,12 @@ def _powershell_content_lines(text: str) -> list[str]:
 
 
 def _m06_text(text: str) -> str:
-    """Remove every whole line whose contents contain ``M6`` (case-insensitive)."""
+    """Remove M6 lines and write the result using Windows CRLF line endings."""
 
-    newline = "\r\n" if "\r\n" in text else "\n" if "\n" in text else "\r\n"
     lines, had_final_newline = _split_normalised_lines(text)
     kept = [line for line in lines if not re.search(r"M6", line, re.IGNORECASE)]
-    result = newline.join(kept)
-    return result + newline if had_final_newline else result
+    result = "\r\n".join(kept)
+    return result + "\r\n" if had_final_newline else result
 
 
 def _m304_text(text: str) -> str:

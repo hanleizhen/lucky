@@ -9,10 +9,10 @@ def test_m06_removes_every_line_containing_m6_like_the_batch_shortcut() -> None:
     assert transform_text(source, M06) == "%\r\nN20 G0 X0\r\n"
 
 
-def test_m06_preserves_the_original_lf_style_and_absence_of_final_newline() -> None:
-    source = "N10 T1 M6\nN20 G0 X0"
+def test_m06_normalises_lf_input_to_windows_crlf() -> None:
+    source = "N10 T1 M6\nN20 G0 X0\nN30 M3\n"
 
-    assert transform_text(source, "m6") == "N20 G0 X0"
+    assert transform_text(source, "m6") == "N20 G0 X0\r\nN30 M3\r\n"
 
 
 def test_m304_inserts_blocks_after_the_first_matching_g43_and_m5() -> None:
@@ -70,7 +70,7 @@ def test_transform_file_overwrites_for_m06_and_m304_but_copper_replaces_nc_with_
     m06_path = tmp_path / "M06.NC"
     m06_path.write_bytes(b"T1 M6\nG0 X0\n")
     assert transform_file(m06_path, M06, encoding="ascii") == m06_path
-    assert m06_path.read_bytes() == b"G0 X0\n"
+    assert m06_path.read_bytes() == b"G0 X0\r\n"
 
     m304_path = tmp_path / "M304.NC"
     m304_path.write_bytes(b"G43H1Z20.M8\nM5\n")

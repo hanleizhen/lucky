@@ -4,7 +4,7 @@
   #define MyAppVersion "0.0.0"
 #endif
 
-#define MyAppName "CNC程序单自动生成工具"
+#define MyAppName "CNC 智能程序单"
 #define MyAppExeName "CNCProgramSheet.exe"
 
 [Setup]
@@ -17,6 +17,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=build\installer
 OutputBaseFilename={#MyAppName}_{#MyAppVersion}_Setup_x64
+SetupIconFile=assets\cnc_smart_sheet_icon.ico
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -31,6 +32,12 @@ Source: "build\dist\CNCProgramSheet\*"; DestDir: "{app}"; Flags: ignoreversion r
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+
+[InstallDelete]
+; Rename only the old app shortcuts.  The app id, executable, installation
+; folder and user-data directory remain unchanged, so updates stay seamless.
+Type: files; Name: "{autoprograms}\CNC程序单自动生成工具.lnk"
+Type: files; Name: "{autodesktop}\CNC程序单自动生成工具.lnk"
 
 [Dirs]
 ; This directory is owned by the user. The app creates settings, templates,
