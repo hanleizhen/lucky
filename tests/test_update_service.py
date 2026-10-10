@@ -9,7 +9,7 @@ from cnc_program_sheet.update_service import HTTP_USER_AGENT, UpdateInfo
 def test_update_user_agent_is_ascii_safe() -> None:
     """GitHub requests must not include the Chinese display name in headers."""
 
-    assert HTTP_USER_AGENT == "CNCProgramSheet/1.1.18"
+    assert HTTP_USER_AGENT == "CNCProgramSheet/1.1.19"
     assert HTTP_USER_AGENT.isascii()
     assert Request("https://api.github.com", headers={"User-Agent": HTTP_USER_AGENT})
 
@@ -19,16 +19,16 @@ def test_latest_prefers_public_release_manifest_without_calling_api(monkeypatch)
 
     def fake_json_request(url: str):
         calls.append(url)
-        return {"version": "1.1.19", "installer_name": "CNCProgramSheet_1.1.19_Setup_x64.exe"}
+        return {"version": "1.1.20", "installer_name": "CNCProgramSheet_1.1.20_Setup_x64.exe"}
 
     monkeypatch.setattr(update_service, "_json_request", fake_json_request)
 
     update = update_service.check_latest("hanleizhen/lucky")
 
     assert update is not None
-    assert update.version == "1.1.19"
-    assert update.installer_url == "https://github.com/hanleizhen/lucky/releases/download/v1.1.19/CNCProgramSheet_1.1.19_Setup_x64.exe"
-    assert update.checksum_url == "https://github.com/hanleizhen/lucky/releases/download/v1.1.19/SHA256SUMS.txt"
+    assert update.version == "1.1.20"
+    assert update.installer_url == "https://github.com/hanleizhen/lucky/releases/download/v1.1.20/CNCProgramSheet_1.1.20_Setup_x64.exe"
+    assert update.checksum_url == "https://github.com/hanleizhen/lucky/releases/download/v1.1.20/SHA256SUMS.txt"
     assert calls == ["https://github.com/hanleizhen/lucky/releases/latest/download/CNCProgramSheet_update.json"]
 
 
@@ -40,9 +40,9 @@ def test_latest_falls_back_to_api_only_for_old_release_without_manifest(monkeypa
         if url.endswith(update_service.STABLE_UPDATE_MANIFEST):
             raise update_service.UpdateError("HTTP Error 404: Not Found")
         return {
-            "tag_name": "v1.1.19",
+            "tag_name": "v1.1.20",
             "assets": [
-                {"name": "CNCProgramSheet_1.1.19_Setup_x64.exe", "browser_download_url": "https://example.test/setup"},
+                {"name": "CNCProgramSheet_1.1.20_Setup_x64.exe", "browser_download_url": "https://example.test/setup"},
                 {"name": "SHA256SUMS.txt", "browser_download_url": "https://example.test/sha"},
             ],
             "html_url": "https://example.test/release",

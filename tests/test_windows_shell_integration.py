@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import cnc_program_sheet.main as app_main
+from PIL import Image
 from cnc_program_sheet.version import APP_USER_MODEL_ID
 
 
@@ -31,3 +32,13 @@ def test_installer_recreates_shortcuts_with_a_versioned_standalone_icon() -> Non
     assert installer.count(f'AppUserModelID: "{APP_USER_MODEL_ID}"') == 2
     assert 'Type: files; Name: "{autodesktop}\\CNC 智能程序单.lnk"' in installer
     assert 'Type: files; Name: "{autoprograms}\\CNC 智能程序单.lnk"' in installer
+
+
+def test_application_icon_has_a_genuinely_transparent_background() -> None:
+    """The desktop icon must not carry the old white rounded-square backdrop."""
+
+    for filename in ("cnc_smart_sheet_icon.png", "cnc_smart_sheet_icon.ico"):
+        with Image.open(ROOT / "assets" / filename) as image:
+            alpha = image.convert("RGBA").getchannel("A")
+            assert alpha.getextrema()[0] == 0
+            assert alpha.getpixel((0, 0)) == 0
