@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import sys
@@ -70,7 +71,7 @@ from .update_service import (
     open_release_page,
     start_installer_after_exit,
 )
-from .version import APP_ICON_FILE, APP_NAME, __version__
+from .version import APP_ICON_FILE, APP_NAME, APP_USER_MODEL_ID, __version__
 
 
 RESULT_COLUMNS: list[tuple[str, str]] = [
@@ -105,6 +106,22 @@ def natural_program_sort_key(name: str) -> tuple[object, ...]:
     """Sort program names as an operator expects: O-2 before O-10."""
 
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name.casefold()))
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Associate the process with the stable Windows shortcut/taskbar identity.
+
+    This is intentionally best-effort: the desktop app still runs on systems
+    where the Win32 shell API is unavailable, while Windows gets a stable
+    identity before Qt creates its application and taskbar window.
+    """
+
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except (AttributeError, OSError):
+        return
 
 
 def clipboard_nc_paths(mime_data: Any) -> list[Path]:
@@ -2312,6 +2329,7 @@ class MainWindow(QMainWindow):
 
 
 def run() -> int:
+    _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("CNCProgramSheet")

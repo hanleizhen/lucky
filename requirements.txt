@@ -4,4 +4,8 @@ Pillow>=10,<12
 # otherwise successful Qt test run.  Keep the CI-proven 6.11 line for builds.
 PySide6>=6.8,<6.12
 PyInstaller>=6.11,<7
+# Use the Windows certificate store for the updater.  This keeps HTTPS
+# verification enabled even when a corporate proxy or security product has
+# installed its trusted inspection certificate only in Windows.
+truststore>=0.10,<1
 pytest>=8.3,<9

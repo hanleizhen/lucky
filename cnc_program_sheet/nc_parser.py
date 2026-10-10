@@ -43,6 +43,15 @@ TOOL_HEADER_SPEC_RE = re.compile(
     rf"{TOOL_HEADER_PREFIX}D\s*(?P<diameter>{NUMBER_VALUE})(?:\s*R\s*(?P<radius>{NUMBER_VALUE}))?",
     re.I,
 )
+# SolidCAM can put the tool geometry in a formal tool-list comment instead of
+# the compact controller header, for example ``(T01 : D4. L37.5 CL15. 1F)``.
+# The colon form is deliberately matched only as a complete parenthesised
+# ``T<number> : ...`` entry.  A standalone executable ``G41 D1`` or a fixed
+# cycle's ``R`` plane can therefore never satisfy this rule.
+SOLIDCAM_TOOL_LIST_DIAMETER_RE = re.compile(
+    rf"^\s*\(\s*T\s*\d+\s*:\s*[^)]*?(?<![A-Z0-9])D\s*(?P<diameter>{NUMBER_VALUE})[^)]*\)\s*$",
+    re.I,
+)
 # ``D1C40`` (often written as ``(T1)D1C40|H1)``) is an explicit chamfer-tool
 # declaration in the supplied NC convention.  It is only considered while
 # examining program-header/comment evidence, never arbitrary later G-code.
@@ -143,6 +152,10 @@ def _find_diameter(evidence_lines: list[str]) -> tuple[str | None, bool]:
 
     values: list[str] = []
     for line in evidence_lines:
+        tool_list_match = SOLIDCAM_TOOL_LIST_DIAMETER_RE.search(line)
+        if tool_list_match:
+            values.append(_normalise_number(tool_list_match.group("diameter")))
+            continue
         header_match = TOOL_HEADER_SPEC_RE.search(line)
         if header_match:
             values.append(_normalise_number(header_match.group("diameter")))
@@ -290,7 +303,11 @@ def _extract_evidence(lines: list[str]) -> tuple[list[str], list[str]]:
         code = _without_comments(line)
         # Preserve the original compact header as a single unit: stripping
         # ``(T1)`` would otherwise separate it from its following D/R values.
-        if in_header and (TOOL_HEADER_SPEC_RE.search(line) or TOOL_HEADER_CHAMFER_RE.search(line)):
+        if in_header and (
+            TOOL_HEADER_SPEC_RE.search(line)
+            or TOOL_HEADER_CHAMFER_RE.search(line)
+            or SOLIDCAM_TOOL_LIST_DIAMETER_RE.search(line)
+        ):
             evidence.append(line)
         if comment:
             evidence.append(comment)

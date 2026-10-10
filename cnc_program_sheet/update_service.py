@@ -14,6 +14,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+try:
+    # ``truststore`` validates through Windows' native certificate chain.
+    # Keep the import optional so an incomplete older installation can still
+    # use the secure Windows-store import fallback below.
+    import truststore
+except ImportError:  # pragma: no cover - release dependencies include it
+    truststore = None
+
 from .app_paths import updates_dir
 from .version import APP_NAME, __version__
 
@@ -32,19 +40,54 @@ class UpdateError(RuntimeError):
     pass
 
 
+def _require_strict_tls(context: ssl.SSLContext) -> ssl.SSLContext:
+    """Explicitly retain certificate and hostname verification on a context."""
+
+    # ``ssl.create_default_context`` and ``truststore.SSLContext`` are secure
+    # by default.  Set both flags explicitly nevertheless: an updater must
+    # never silently fall back to an unverified TLS connection.
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = True
+    return context
+
+
+def _windows_native_ssl_context() -> ssl.SSLContext | None:
+    """Create a strictly verified context backed by the Windows trust store.
+
+    Some managed networks and HTTPS scanners place their trusted issuer only
+    in the Windows certificate store.  PyInstaller's embedded OpenSSL bundle
+    may not see it; ``truststore`` delegates chain verification to Windows.
+    If that integration is unavailable on a particular computer, callers
+    deliberately fall back to the existing secure certificate-import path.
+    """
+
+    if sys.platform != "win32" or truststore is None:
+        return None
+    try:
+        return _require_strict_tls(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    except Exception:
+        # Do not weaken TLS when the native integration cannot initialise.
+        # The caller continues with a standard verified context plus Windows
+        # ROOT/CA certificates instead.
+        return None
+
+
 @lru_cache(maxsize=1)
 def _trusted_ssl_context() -> ssl.SSLContext:
     """Keep TLS verification while also trusting Windows-installed roots.
 
-    A PyInstaller Python runtime can use an OpenSSL CA bundle that does not
-    contain a root certificate installed by a corporate proxy or a security
-    product's HTTPS scanner. On Windows, add the already trusted ROOT and CA
-    store certificates to the normal secure context. This does *not* disable
-    hostname or certificate validation; it only aligns the bundled runtime
-    with the Windows trust decision on the user's computer.
+    Prefer ``truststore`` on Windows because it uses the native certificate
+    chain at verification time.  If it cannot initialise, a PyInstaller
+    Python runtime can still add already trusted ROOT and CA store
+    certificates to a normal secure context.  Neither path disables hostname
+    or certificate validation.
     """
 
-    context = ssl.create_default_context()
+    native_context = _windows_native_ssl_context()
+    if native_context is not None:
+        return native_context
+
+    context = _require_strict_tls(ssl.create_default_context())
     if sys.platform != "win32" or not hasattr(ssl, "enum_certificates"):
         return context
     for store_name in ("ROOT", "CA"):

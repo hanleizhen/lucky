@@ -27,6 +27,76 @@ M30
     assert record.depth == "Z-18.5"
 
 
+def test_solidcam_tool_list_entry_supplies_diameter_without_a_type_keyword() -> None:
+    """A formal ``T01 : D4`` list entry is geometry, not a D offset."""
+
+    record = parse_text(
+        """%
+(TOOLS LIST)
+(T01 : D4. L37.5 CL15. 1F)
+G00 G91 G28 Z0.
+N1 (D-DRILL2)
+G98 G81 Z-1.5 R2. F50.
+M30
+%""",
+        "3011-1.NC",
+    )
+
+    assert (record.tool_number, record.detected_tool_type, record.diameter, record.radius, record.machining_data, record.depth) == (
+        "T01",
+        "钻头",
+        "D4",
+        "",
+        "G81",
+        "Z-1.5",
+    )
+
+
+def test_solidcam_tool_list_entry_handles_corrupted_type_text() -> None:
+    """The structured D field stays reliable even if a Chinese type label is garbled."""
+
+    record = parse_text(
+        """%
+(TOOLS LIST)
+(T02 : 资头 D6. L35. CL24. 1F)
+G00 G91 G28 Z0.
+N1 (D-DRILL1-1)
+G98 G83 Z-23. R2. Q2. F50.
+M30
+%""",
+        "3011-2.NC",
+    )
+
+    assert (record.tool_number, record.detected_tool_type, record.diameter, record.radius, record.machining_data, record.depth) == (
+        "T02",
+        "钻头",
+        "D6",
+        "",
+        "G83",
+        "Z-23",
+    )
+
+
+def test_solidcam_tool_list_rule_does_not_accept_executable_d_or_cycle_r() -> None:
+    record = parse_text(
+        """%
+(TOOLS LIST)
+(T01 : D-DRILL2 L37.5 CL15. 1F)
+G41 D1
+G81 X0 Y0 Z-18.5 R1.
+M30
+%""",
+        "solidcam-offset.NC",
+    )
+
+    assert (record.diameter, record.radius, record.machining_data, record.depth) == (
+        UNRECOGNIZED,
+        "",
+        "G81",
+        "Z-18.5",
+    )
+
+
 def test_minimum_real_z_is_used() -> None:
     record = parse_text(
         """(D5 DRILL)

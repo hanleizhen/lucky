@@ -28,14 +28,22 @@ UninstallDisplayName={#MyAppName}
 
 [Files]
 Source: "build\dist\CNCProgramSheet\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Put a versioned standalone icon beside the EXE.  Using a new icon path for
+; every release prevents the Windows Shell shortcut cache from retaining an
+; old EXE icon after an in-place upgrade.
+Source: "assets\cnc_smart_sheet_icon.ico"; DestDir: "{app}"; DestName: "CNCProgramSheet_icon_{#MyAppVersion}.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\CNCProgramSheet_icon_{#MyAppVersion}.ico"; IconIndex: 0; AppUserModelID: "CNCProgramSheet.CNCSmartSheet"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\CNCProgramSheet_icon_{#MyAppVersion}.ico"; IconIndex: 0; AppUserModelID: "CNCProgramSheet.CNCSmartSheet"
 
 [InstallDelete]
-; Rename only the old app shortcuts.  The app id, executable, installation
-; folder and user-data directory remain unchanged, so updates stay seamless.
+; Recreate the current shortcuts so their IconFilename is refreshed.  The app
+; id, executable, installation folder and user-data directory remain
+; unchanged, so updates stay seamless.
+Type: files; Name: "{autoprograms}\CNC 智能程序单.lnk"
+Type: files; Name: "{autodesktop}\CNC 智能程序单.lnk"
+; Rename only the old app shortcuts.
 Type: files; Name: "{autoprograms}\CNC程序单自动生成工具.lnk"
 Type: files; Name: "{autodesktop}\CNC程序单自动生成工具.lnk"
 
