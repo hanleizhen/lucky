@@ -917,8 +917,8 @@ class ExcelPreview(QTableWidget):
             self._loading = False
         if written:
             self.clearSelection()
-            self.setRangeSelected(QTableWidgetSelectionRange(start_row, start_column, last_row, last_column), True)
             self.setCurrentCell(start_row, start_column)
+            self.setRangeSelected(QTableWidgetSelectionRange(start_row, start_column, last_row, last_column), True)
         return written
 
     def _selected_range(self) -> tuple[int, int, int, int] | None:
