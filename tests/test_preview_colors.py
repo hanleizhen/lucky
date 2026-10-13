@@ -38,3 +38,18 @@ def test_preview_moves_program_values_without_changing_template_cell_style() -> 
     assert preview.item(7, 1).background().color().name() == original_color
     preview.close()
     assert app is not None
+
+
+def test_preview_pastes_tabular_text_at_the_selected_cell() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.setCurrentCell(6, 1)  # B7
+
+    assert preview.paste_text_grid("A\tB\nC\tD") == 4
+    assert preview.item(6, 1).text() == "A"
+    assert preview.item(6, 2).text() == "B"
+    assert preview.item(7, 1).text() == "C"
+    assert preview.item(7, 2).text() == "D"
+    preview.close()
+    assert app is not None

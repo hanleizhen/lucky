@@ -87,6 +87,24 @@ def test_insert_rotation_marker_is_red_and_exports_as_a_red_instruction(tmp_path
     assert app is not None
 
 
+def test_reapplying_records_keeps_operator_text_in_other_editable_cells() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.load_template(Path("assets/CNC程序单.xlsx"))
+    window.records = [_record("O-1.NC")]
+    window._apply_records_to_view()
+
+    note = window.preview.item(6, 6)  # G7 is an editable blank template cell.
+    assert note is not None
+    note.setText("客户备注")
+    assert window.manual_cells["G7"] == "客户备注"
+
+    window._apply_records_to_view()
+    assert window.preview.item(6, 6).text() == "客户备注"
+    window.close()
+    assert app is not None
+
+
 def test_multi_tool_import_with_available_capacity_does_not_report_negative_overflow(tmp_path: Path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "0505.NC"

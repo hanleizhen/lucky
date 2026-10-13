@@ -12,8 +12,8 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QPointF, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 
 from .app_paths import (
     cache_pasted_nc_program,
@@ -756,6 +757,8 @@ class ExcelPreview(QTableWidget):
     remove_blank_row_requested = Signal(int)
     clipboard_image_paste_requested = Signal()
     clipboard_nc_paste_requested = Signal()
+    clipboard_table_paste_requested = Signal()
+    delete_cells_requested = Signal(int, int, int, int)
     image_geometry_changed = Signal(str, str, int, int, int, int)
     image_delete_requested = Signal(str)
 
@@ -793,17 +796,28 @@ class ExcelPreview(QTableWidget):
 
     def _show_program_row_menu(self, position: Any) -> None:
         index = self.indexAt(position)
-        if not index.isValid() or not self._is_program_table_row(index.row()):
+        if not index.isValid():
             return
         self.setCurrentCell(index.row(), index.column())
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu::item { color: #d00000; font-weight: 600; }")
+        paste = menu.addAction("粘贴（先在 Win+V 选择内容）")
+        paste.triggered.connect(self.clipboard_table_paste_requested)
+        copy_action = menu.addAction("复制")
+        copy_action.triggered.connect(self.copy_selected_cells)
+        cut_action = menu.addAction("剪切")
+        cut_action.triggered.connect(self.cut_selected_cells)
+        if not self._is_program_table_row(index.row()):
+            menu.exec(self.viewport().mapToGlobal(position))
+            return
+        menu.addSeparator()
         menu.addSection("在下方插入")
         insert = menu.addAction("1. 空行")
         insert.setEnabled(index.row() < LAYOUT.last_program_row - 1)
         insert.triggered.connect(lambda: self.insert_blank_row_requested.emit(index.row() + 1))
         for sequence, marker in enumerate(ROTATION_MARKERS, start=2):
             action = menu.addAction(f"{sequence}. {marker}（红色提示行）")
+            action.setIconText(action.text())
+            action.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold))
             action.setEnabled(index.row() < LAYOUT.last_program_row - 1)
             action.triggered.connect(
                 lambda checked=False, marker_text=marker: self.insert_marker_row_requested.emit(index.row() + 1, marker_text)
@@ -813,7 +827,98 @@ class ExcelPreview(QTableWidget):
         remove.triggered.connect(lambda: self.remove_blank_row_requested.emit(index.row()))
         menu.exec(self.viewport().mapToGlobal(position))
 
+    def _paste_anchor(self) -> tuple[int, int] | None:
+        coordinate = self.current_coordinate()
+        if not coordinate:
+            return None
+        letters = "".join(character for character in coordinate if character.isalpha())
+        digits = "".join(character for character in coordinate if character.isdigit())
+        if not letters or not digits:
+            return None
+        column = 0
+        for character in letters:
+            column = column * 26 + ord(character) - 65 + 1
+        return int(digits) - 1, column - 1
+
+    def paste_text_grid(self, text: str) -> int:
+        """Paste ordinary clipboard text as a tab/newline cell rectangle."""
+
+        anchor = self._paste_anchor()
+        if anchor is None or not text:
+            return 0
+        start_row, start_column = anchor
+        rows = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if rows and rows[-1] == "":
+            rows.pop()
+        written = 0
+        self._loading = True
+        try:
+            for row_offset, line in enumerate(rows):
+                for column_offset, value in enumerate(line.split("\t")):
+                    row, column = start_row + row_offset, start_column + column_offset
+                    if row >= self.rowCount() or column >= self.columnCount():
+                        continue
+                    item = self.item(row, column)
+                    if item is None or not (item.flags() & Qt.ItemFlag.ItemIsEditable):
+                        continue
+                    item.setText(value)
+                    coordinate = item.data(Qt.ItemDataRole.UserRole)
+                    if coordinate:
+                        self.cell_edited.emit(str(coordinate), value)
+                    written += 1
+        finally:
+            self._loading = False
+        return written
+
+    def _selected_range(self) -> tuple[int, int, int, int] | None:
+        ranges = self.selectedRanges()
+        if not ranges:
+            anchor = self._paste_anchor()
+            return (*anchor, *anchor) if anchor else None
+        selection = ranges[0]
+        return selection.topRow(), selection.leftColumn(), selection.bottomRow(), selection.rightColumn()
+
+    def copy_selected_cells(self) -> None:
+        selection = self._selected_range()
+        if selection is None:
+            return
+        top, left, bottom, right = selection
+        lines = []
+        for row in range(top, bottom + 1):
+            lines.append("\t".join(self.item(row, column).text() if self.item(row, column) is not None else "" for column in range(left, right + 1)))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def cut_selected_cells(self) -> None:
+        self.copy_selected_cells()
+        self.clear_selected_cells()
+
+    def clear_selected_cells(self) -> None:
+        selection = self._selected_range()
+        if selection is None:
+            return
+        top, left, bottom, right = selection
+        self._loading = True
+        try:
+            for row in range(top, bottom + 1):
+                for column in range(left, right + 1):
+                    item = self.item(row, column)
+                    if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
+                        item.setText("")
+                        coordinate = item.data(Qt.ItemDataRole.UserRole)
+                        if coordinate:
+                            self.cell_edited.emit(str(coordinate), "")
+        finally:
+            self._loading = False
+
     def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selected_cells()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Cut):
+            self.cut_selected_cells()
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.Paste):
             mime_data = QApplication.clipboard().mimeData()
             image_file_in_clipboard = any(
@@ -828,10 +933,18 @@ class ExcelPreview(QTableWidget):
                 self.clipboard_nc_paste_requested.emit()
                 event.accept()
                 return
-        # Delete is intentionally reserved for removing an operator-inserted
-        # blank program row. Individual values remain editable by double click.
-        if event.key() == Qt.Key.Key_Delete and self._is_program_table_row(self.currentRow()):
-            self.remove_blank_row_requested.emit(self.currentRow())
+            if mime_data.hasText():
+                self.clipboard_table_paste_requested.emit()
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_Delete:
+            # Preserve the earlier shortcut: Delete on an inserted empty row
+            # removes that row. Everywhere else Delete behaves like Excel and
+            # clears the selected editable cells.
+            selected = self._selected_range()
+            if selected is not None:
+                top, left, bottom, right = selected
+                self.delete_cells_requested.emit(top, left, bottom, right)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1210,6 +1323,170 @@ class SaveDirectoryDialog(QDialog):
             self.directory.setText(selected)
 
 
+class Toolpath3DView(QWidget):
+    """Interactive, dependency-free STL/toolpath viewport.
+
+    It intentionally uses a painter rather than a GPU-specific package so the
+    same viewer works on customers' office PCs and remote-desktop sessions.
+    Drag with the left mouse button to rotate; mouse wheel zooms.
+    """
+
+    def __init__(self, mesh: StlMesh | None = None, paths: list[ToolPath] | None = None, report: DetectionReport | None = None) -> None:
+        super().__init__()
+        self.mesh = mesh
+        self.paths = paths or []
+        self.report = report or DetectionReport()
+        self.yaw = -0.75
+        self.pitch = 0.42
+        self.zoom = 1.0
+        self._last_mouse = QPoint()
+        self.setMinimumSize(680, 460)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background: #182331; border: 1px solid #50728e;")
+
+    def set_scene(self, mesh: StlMesh | None, paths: list[ToolPath], report: DetectionReport) -> None:
+        self.mesh, self.paths, self.report = mesh, paths, report
+        self.update()
+
+    def _scene_bounds(self) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        points = [point for path in self.paths for point in path.points]
+        if self.mesh:
+            points.extend(self.mesh.bounds_min)
+            points.extend(self.mesh.bounds_max)
+            # The two bounds are flat floats at this point; rebuild below.
+            points = [point for path in self.paths for point in path.points] + [self.mesh.bounds_min, self.mesh.bounds_max]
+        if not points:
+            return None
+        return (
+            tuple(min(point[index] for point in points) for index in range(3)),
+            tuple(max(point[index] for point in points) for index in range(3)),
+        )
+
+    def _projector(self) -> tuple[Callable[[tuple[float, float, float]], tuple[float, float, float]], float] | None:
+        bounds = self._scene_bounds()
+        if not bounds:
+            return None
+        minimum, maximum = bounds
+        center = tuple((minimum[index] + maximum[index]) / 2.0 for index in range(3))
+        extent = max(maximum[index] - minimum[index] for index in range(3), 1.0)
+        scale = min(self.width(), self.height()) * 0.76 * self.zoom / extent
+        cos_yaw, sin_yaw = __import__("math").cos(self.yaw), __import__("math").sin(self.yaw)
+        cos_pitch, sin_pitch = __import__("math").cos(self.pitch), __import__("math").sin(self.pitch)
+
+        def project(point: tuple[float, float, float]) -> tuple[float, float, float]:
+            x, y, z = (point[index] - center[index] for index in range(3))
+            # Y rotation then X rotation, with a conventional upward screen Y.
+            rx, rz = x * cos_yaw - z * sin_yaw, x * sin_yaw + z * cos_yaw
+            ry, depth = y * cos_pitch - rz * sin_pitch, y * sin_pitch + rz * cos_pitch
+            return self.width() / 2.0 + rx * scale, self.height() / 2.0 - ry * scale, depth
+
+        return project, scale
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#182331"))
+        projected = self._projector()
+        if projected is None:
+            painter.setPen(QColor("#dbeeff"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "尚未导入 3D 成品模型或 NC 刀路")
+            return
+        project, _ = projected
+        if self.mesh:
+            step = max(1, len(self.mesh.triangles) // 8000)
+            faces: list[tuple[float, QPolygonF, QColor]] = []
+            for triangle in self.mesh.triangles[::step]:
+                screen = [project(point) for point in triangle]
+                depth = sum(point[2] for point in screen) / 3.0
+                ax, ay, az = triangle[0]
+                bx, by, bz = triangle[1]
+                cx, cy, cz = triangle[2]
+                nx, ny, nz = ((by - ay) * (cz - az) - (bz - az) * (cy - ay),
+                              (bz - az) * (cx - ax) - (bx - ax) * (cz - az),
+                              (bx - ax) * (cy - ay) - (by - ay) * (cx - ax))
+                light = max(0.25, min(1.0, 0.45 + (nx * 0.2 + ny * 0.35 + nz * 0.7) / max((nx * nx + ny * ny + nz * nz) ** 0.5, 1e-6)))
+                faces.append((depth, QPolygonF([QPointF(point[0], point[1]) for point in screen]), QColor(int(55 * light), int(151 * light), int(207 * light))))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for _, polygon, color in sorted(faces, key=lambda face: face[0]):
+                painter.setBrush(color)
+                painter.drawPolygon(polygon)
+        hit_names = {hit.source_name for hit in self.report.hits}
+        for path in self.paths:
+            if len(path.points) < 2:
+                continue
+            painter.setPen(QPen(QColor("#ff5a5a") if path.source_path.name in hit_names else QColor("#b8f4ff"), 1.6))
+            previous = project(path.points[0])
+            for point in path.points[1:]:
+                current = project(point)
+                painter.drawLine(QPointF(previous[0], previous[1]), QPointF(current[0], current[1]))
+                previous = current
+        painter.setPen(QColor("#e8f5ff"))
+        painter.drawText(12, 22, "左键拖动旋转 · 滚轮缩放 · 青色：刀路 · 红色：疑似过切程序")
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_mouse = event.position().toPoint()
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            current = event.position().toPoint()
+            delta = current - self._last_mouse
+            self.yaw += delta.x() * 0.012
+            self.pitch = max(-1.45, min(1.45, self.pitch + delta.y() * 0.012))
+            self._last_mouse = current
+            self.update()
+
+    def wheelEvent(self, event: Any) -> None:
+        self.zoom = max(0.2, min(8.0, self.zoom * (1.12 if event.angleDelta().y() > 0 else 0.88)))
+        self.update()
+
+
+class ThreeDDialog(QDialog):
+    """Model manager and inspection window owned by :class:`MainWindow`."""
+
+    import_requested = Signal()
+    remove_requested = Signal()
+
+    def __init__(self, mesh: StlMesh | None, paths: list[ToolPath], report: DetectionReport, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("3D 刀路与过切预检")
+        self.resize(940, 680)
+        root = QVBoxLayout(self)
+        self.model_label = QLabel()
+        root.addWidget(self.model_label)
+        self.view = Toolpath3DView(mesh, paths, report)
+        root.addWidget(self.view, 1)
+        self.report_label = QLabel()
+        self.report_label.setWordWrap(True)
+        root.addWidget(self.report_label)
+        note = QLabel("说明：此功能以导入的 STL 成品模型作碰撞边界，按已识别的 D 刀具进行后台预检。圆角、球刀、刀柄、夹具、五轴姿态、毛坯余量及圆弧中间点仍需在专业仿真软件中复核。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #5a6470;")
+        root.addWidget(note)
+        buttons = QHBoxLayout()
+        import_button = QPushButton("导入/更换成品 STL")
+        import_button.clicked.connect(self.import_requested)
+        buttons.addWidget(import_button)
+        remove_button = QPushButton("删除已保存模型")
+        remove_button.clicked.connect(self.remove_requested)
+        remove_button.setEnabled(mesh is not None)
+        buttons.addWidget(remove_button)
+        buttons.addStretch(1)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        root.addLayout(buttons)
+        self.set_scene(mesh, paths, report)
+
+    def set_scene(self, mesh: StlMesh | None, paths: list[ToolPath], report: DetectionReport) -> None:
+        self.view.set_scene(mesh, paths, report)
+        self.model_label.setText(
+            f"当前成品模型：{mesh.source_path.name}（{mesh.triangle_count:,} 个三角面，升级后仍会保留）" if mesh
+            else "当前未导入成品模型。请先导入 STL，再导入或粘贴 NC 程序。"
+        )
+        self.report_label.setStyleSheet("color: #c00000; font-weight: 600;" if report.hits else "color: #176b3a; font-weight: 600;")
+        self.report_label.setText(report.summary)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1236,6 +1513,7 @@ class MainWindow(QMainWindow):
         self._program_area_reset = False
         self._result_loading = False
         self._update_worker: Worker | None = None
+        self._print_printer: QPrinter | None = None
         # An update installer must be allowed to close the running process
         # without the ordinary user-facing close/minimize question.
         self._exiting_for_update = False
@@ -1324,6 +1602,10 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
+        print_sheet = QPushButton("打印")
+        print_sheet.clicked.connect(self.print_program_sheet)
+        print_sheet.setToolTip("打印当前 Excel 程序单预览")
+        toolbar.addWidget(print_sheet)
         m06 = QPushButton("M06")
         m06.clicked.connect(lambda: self.open_conversion_dialog(TransformMode.M06))
         m06.setToolTip("按原 M6 快捷方式修改 NC 程序，并自动填写程序单")
@@ -1387,8 +1669,10 @@ class MainWindow(QMainWindow):
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.insert_marker_row_requested.connect(self.insert_marker_program_row)
         self.preview.remove_blank_row_requested.connect(self.remove_blank_program_row)
+        self.preview.delete_cells_requested.connect(self.delete_preview_cells)
         self.preview.clipboard_image_paste_requested.connect(self.paste_image_from_clipboard)
         self.preview.clipboard_nc_paste_requested.connect(self.paste_nc_from_clipboard)
+        self.preview.clipboard_table_paste_requested.connect(self.paste_table_from_clipboard)
         self.preview.image_geometry_changed.connect(self._update_image_geometry)
         self.preview.image_delete_requested.connect(self._remove_image_by_id)
         # Child widgets normally consume Ctrl+V themselves. Intercept it
@@ -1539,6 +1823,65 @@ class MainWindow(QMainWindow):
             self._add_image_placement(cached_image, anchor, *self._default_image_size(cached_image))
         except Exception as exc:
             self.show_error("无法粘贴图片", str(exc))
+
+    def paste_table_from_clipboard(self) -> None:
+        """Paste the active Win+V item into the selected editable table cell."""
+
+        mime_data = QApplication.clipboard().mimeData()
+        image_file_in_clipboard = any(
+            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_FILE_SUFFIXES
+            for url in mime_data.urls()
+        )
+        if mime_data.hasImage() or image_file_in_clipboard:
+            self.paste_image_from_clipboard()
+            return
+        if mime_data.hasText():
+            count = self.preview.paste_text_grid(mime_data.text())
+            self.statusBar().showMessage(
+                f"已粘贴 {count} 个单元格。" if count else "请选择可编辑单元格后再粘贴。",
+                3500,
+            )
+            return
+        self.statusBar().showMessage("当前剪贴板不是可粘贴的文字或图片。请先按 Win+V 选择内容。", 4500)
+
+    def print_program_sheet(self) -> None:
+        """Print the current in-app sheet preview without requiring Excel."""
+
+        if self.preview.rowCount() == 0:
+            self.show_error("无法打印", "当前没有可打印的程序单预览。")
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("打印 CNC 程序单")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Capture the complete fixed template, not merely the scrolled visible
+        # portion of the table. This keeps the lower program rows and the
+        # right-most columns in the paper output.
+        old_size = self.preview.size()
+        old_horizontal = self.preview.horizontalScrollBar().value()
+        old_vertical = self.preview.verticalScrollBar().value()
+        full_width = self.preview.verticalHeader().width() + sum(self.preview.columnWidth(column) for column in range(self.preview.columnCount())) + 4
+        full_height = self.preview.horizontalHeader().height() + sum(self.preview.rowHeight(row) for row in range(self.preview.rowCount())) + 4
+        self.preview.resize(full_width, full_height)
+        QApplication.processEvents()
+        image = self.preview.grab()
+        self.preview.resize(old_size)
+        self.preview.horizontalScrollBar().setValue(old_horizontal)
+        self.preview.verticalScrollBar().setValue(old_vertical)
+        painter = QPainter(printer)
+        try:
+            page = printer.pageRect(QPrinter.Unit.DevicePixel)
+            scaled = image.scaled(page.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap(
+                round(page.x() + (page.width() - scaled.width()) / 2),
+                round(page.y() + (page.height() - scaled.height()) / 2),
+                scaled,
+            )
+        finally:
+            painter.end()
+        self.statusBar().showMessage("已发送到打印机。", 3500)
 
     def _clipboard_contains_nc_input(self) -> bool:
         mime_data = QApplication.clipboard().mimeData()
@@ -1973,6 +2316,15 @@ class MainWindow(QMainWindow):
         self._apply_records_to_view()
         self.statusBar().showMessage("已取消空行或提示行，后续程序数据已上移。", 3500)
 
+    def delete_preview_cells(self, top: int, left: int, bottom: int, right: int) -> None:
+        """Keep Delete compatible with both blank-row removal and Excel edits."""
+
+        index = self._program_row_index(top)
+        if top == bottom and index is not None and index < len(self.records) and self.records[index] is None:
+            self.remove_blank_program_row(top)
+            return
+        self.preview.clear_selected_cells()
+
     def add_nc_files(self, paths: list[Path]) -> None:
         paths = [path for path in paths if is_supported_nc_file(path)]
         if not paths:
@@ -2120,14 +2472,14 @@ class MainWindow(QMainWindow):
             for cell, value in cleared.items():
                 self.preview.set_value(cell, value)
             self._program_area_reset = True
-        # Re-parsing deliberately resets automatic fields. Other cells edited in
-        # the preview stay intact until the user chooses “清空”. Clear previous
-        # automatic values first so a manually inserted blank row remains blank.
+        # Re-parsing deliberately refreshes values that come from the NC
+        # records. Do *not* blank the entire program area here: the operator
+        # may have typed remarks, copied notes or pasted a range into other
+        # editable cells, and those values must remain visible after any edit,
+        # re-parse or additional NC import.
         automatic = automatic_cells_for_rows(self.records)
-        automatic_area = cleared_program_cells()
-        self.manual_cells.update(automatic_area)
         self.manual_cells.update(automatic)
-        for cell, value in {**automatic_area, **automatic}.items():
+        for cell, value in automatic.items():
             self.preview.set_value(cell, value)
         # Normal data returns to the template's black text. Marker cells are
         # reapplied below in red after automatic values have cleared the area.
@@ -2364,14 +2716,22 @@ class MainWindow(QMainWindow):
             self.show_error("保存程序单失败", str(exc))
 
     def _show_save_success(self, target: Path) -> None:
+        # A newly installed version explains the completed first save once.
+        # Later saves stay quiet (status bar only), and “永不提醒” suppresses
+        # this message even after future upgrades.
         if self.settings.get("show_save_success_message", True) is False:
             self.statusBar().showMessage(f"程序单已保存：{target}", 5000)
             return
+        if self.settings.get("save_notice_version") == __version__:
+            self.statusBar().showMessage(f"程序单已保存：{target}", 5000)
+            return
+        self.settings["save_notice_version"] = __version__
+        save_settings(self.settings)
         box = QMessageBox(self)
-        box.setWindowTitle("程序单保存成功")
+        box.setWindowTitle("新版首次保存完成")
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText("程序单保存成功")
-        box.setInformativeText(str(target))
+        box.setText(f"v{__version__} 已完成第一次程序单保存")
+        box.setInformativeText(f"{target}\n\n之后保存将不再弹窗，只会在底部显示完成信息。")
         never_remind = QCheckBox("永不提醒")
         box.setCheckBox(never_remind)
         open_file = box.addButton("打开文件", QMessageBox.ButtonRole.AcceptRole)
