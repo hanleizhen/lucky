@@ -3,7 +3,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTableWidgetSelectionRange
 
 from cnc_program_sheet.main import ExcelPreview
 
@@ -51,5 +51,24 @@ def test_preview_pastes_tabular_text_at_the_selected_cell() -> None:
     assert preview.item(6, 2).text() == "B"
     assert preview.item(7, 1).text() == "C"
     assert preview.item(7, 2).text() == "D"
+    preview.close()
+    assert app is not None
+
+
+def test_preview_single_value_fills_the_selected_rectangle_like_excel() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.setCurrentCell(6, 1)
+    preview.setRangeSelected(QTableWidgetSelectionRange(6, 1, 7, 2), True)  # B7:C8
+
+    assert preview.paste_text_grid("客户备注") == 4
+    assert [preview.item(row, column).text() for row in (6, 7) for column in (1, 2)] == [
+        "客户备注",
+        "客户备注",
+        "客户备注",
+        "客户备注",
+    ]
+    assert len(preview.selectedIndexes()) == 4
     preview.close()
     assert app is not None

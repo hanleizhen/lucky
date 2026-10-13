@@ -38,10 +38,12 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTableWidgetSelectionRange,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewDialog
 
 from .app_paths import (
     cache_pasted_nc_program,
@@ -781,9 +783,25 @@ class ExcelPreview(QTableWidget):
         self.setPalette(palette)
         self.setAlternatingRowColors(False)
         self.setWordWrap(True)
+        # Keep selection and editing behaviour close to Excel: a mouse drag
+        # selects a rectangle, Shift extends it and Ctrl keeps extra cells.
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+        self.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+            | QTableWidget.EditTrigger.AnyKeyPressed
+        )
+        # Some Windows palettes use white text for a selected table item.
+        # That makes the contents appear to disappear on a light template, so
+        # give the selection an explicit Excel-like blue fill and dark text.
+        self.setStyleSheet(
+            "QTableWidget::item:selected { background-color: #B7D7FF; color: #000000; }"
+            "QTableWidget::item:selected:active { background-color: #8EC5FF; color: #000000; }"
+            "QTableWidget::item:focus { border: 2px solid #2176D2; }"
+        )
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_program_row_menu)
         self.itemChanged.connect(self._on_item_changed)
@@ -827,7 +845,23 @@ class ExcelPreview(QTableWidget):
         remove.triggered.connect(lambda: self.remove_blank_row_requested.emit(index.row()))
         menu.exec(self.viewport().mapToGlobal(position))
 
+    def _selection_rectangle(self) -> tuple[int, int, int, int] | None:
+        """Return the bounding rectangle for the current Excel-like selection."""
+
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return None
+        return (
+            min(index.row() for index in indexes),
+            min(index.column() for index in indexes),
+            max(index.row() for index in indexes),
+            max(index.column() for index in indexes),
+        )
+
     def _paste_anchor(self) -> tuple[int, int] | None:
+        selection = self._selection_rectangle()
+        if selection is not None:
+            return selection[0], selection[1]
         coordinate = self.current_coordinate()
         if not coordinate:
             return None
@@ -850,11 +884,23 @@ class ExcelPreview(QTableWidget):
         rows = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         if rows and rows[-1] == "":
             rows.pop()
+        source = [line.split("\t") for line in rows]
+        selection = self._selection_rectangle()
+        # Excel fills a selected rectangle when a single copied cell is
+        # pasted.  Multi-cell clipboard data begins in the top-left cell.
+        if len(source) == 1 and len(source[0]) == 1 and selection is not None:
+            target_rows = range(selection[0], selection[2] + 1)
+            target_columns = range(selection[1], selection[3] + 1)
+            grid = [[source[0][0] for _ in target_columns] for _ in target_rows]
+            start_row, start_column = selection[0], selection[1]
+        else:
+            grid = source
         written = 0
+        last_row, last_column = start_row, start_column
         self._loading = True
         try:
-            for row_offset, line in enumerate(rows):
-                for column_offset, value in enumerate(line.split("\t")):
+            for row_offset, line in enumerate(grid):
+                for column_offset, value in enumerate(line):
                     row, column = start_row + row_offset, start_column + column_offset
                     if row >= self.rowCount() or column >= self.columnCount():
                         continue
@@ -866,17 +912,21 @@ class ExcelPreview(QTableWidget):
                     if coordinate:
                         self.cell_edited.emit(str(coordinate), value)
                     written += 1
+                    last_row, last_column = max(last_row, row), max(last_column, column)
         finally:
             self._loading = False
+        if written:
+            self.clearSelection()
+            self.setRangeSelected(QTableWidgetSelectionRange(start_row, start_column, last_row, last_column), True)
+            self.setCurrentCell(start_row, start_column)
         return written
 
     def _selected_range(self) -> tuple[int, int, int, int] | None:
-        ranges = self.selectedRanges()
-        if not ranges:
+        selection = self._selection_rectangle()
+        if selection is None:
             anchor = self._paste_anchor()
             return (*anchor, *anchor) if anchor else None
-        selection = ranges[0]
-        return selection.topRow(), selection.leftColumn(), selection.bottomRow(), selection.rightColumn()
+        return selection
 
     def copy_selected_cells(self) -> None:
         selection = self._selected_range()
@@ -1276,20 +1326,60 @@ class ExcelPreview(QTableWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, current_repository: str, parent: QWidget | None = None) -> None:
+    """The single, familiar settings entry point for normal users."""
+
+    def __init__(
+        self,
+        current_repository: str,
+        show_save_reminder: bool,
+        automatic_update_check: bool,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("更新设置")
+        self.setWindowTitle("设置")
+        self.resize(480, 310)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
-        form = QFormLayout(self)
-        form.addRow("GitHub 更新仓库：", self.repository)
-        note = QLabel("发布版会自动写入该仓库。仅在私有部署或测试时需要手动填写。")
-        note.setWordWrap(True)
-        form.addRow(note)
+        self.save_reminder = QCheckBox("保存完成后显示提醒")
+        self.save_reminder.setChecked(show_save_reminder)
+        self.automatic_update_check = QCheckBox("启动后及后台自动检查更新")
+        self.automatic_update_check.setChecked(automatic_update_check)
+
+        root = QVBoxLayout(self)
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
+
+        general = QWidget()
+        general_layout = QVBoxLayout(general)
+        general_layout.addWidget(QLabel(f"{APP_NAME}  v{__version__}"))
+        general_note = QLabel("程序模板、保存位置、图片与个人设置均保存在本机 AppData；升级软件不会删除这些内容。")
+        general_note.setWordWrap(True)
+        general_layout.addWidget(general_note)
+        general_layout.addStretch(1)
+        tabs.addTab(general, "常规")
+
+        reminders = QWidget()
+        reminder_layout = QVBoxLayout(reminders)
+        reminder_layout.addWidget(self.save_reminder)
+        reminder_note = QLabel("关闭后，保存成功只在窗口底部显示状态，不再弹出提示。随时可在这里重新打开。")
+        reminder_note.setWordWrap(True)
+        reminder_layout.addWidget(reminder_note)
+        reminder_layout.addStretch(1)
+        tabs.addTab(reminders, "提醒")
+
+        updates = QWidget()
+        update_form = QFormLayout(updates)
+        update_form.addRow(self.automatic_update_check)
+        update_form.addRow("GitHub 更新仓库：", self.repository)
+        update_note = QLabel("正常用户无需改动仓库。关闭自动检查后，仍可随时点击主界面的“检查更新”。")
+        update_note.setWordWrap(True)
+        update_form.addRow(update_note)
+        tabs.addTab(updates, "更新")
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        root.addWidget(buttons)
 
 
 class SaveDirectoryDialog(QDialog):
@@ -1438,7 +1528,11 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
-        print_sheet = QPushButton("打印")
+        print_preview = QPushButton("打印预览")
+        print_preview.clicked.connect(self.preview_program_sheet)
+        print_preview.setToolTip("先预览分页与缩放效果，再选择打印机")
+        toolbar.addWidget(print_preview)
+        print_sheet = QPushButton("直接打印")
         print_sheet.clicked.connect(self.print_program_sheet)
         print_sheet.setToolTip("打印当前 Excel 程序单预览")
         toolbar.addWidget(print_sheet)
@@ -1461,9 +1555,10 @@ class MainWindow(QMainWindow):
         updates = QPushButton("检查更新")
         updates.clicked.connect(lambda: self.check_updates(silent=False))
         toolbar.addWidget(updates)
-        update_settings = QPushButton("更新设置")
-        update_settings.clicked.connect(self.edit_update_settings)
-        toolbar.addWidget(update_settings)
+        settings_button = QPushButton("设置")
+        settings_button.clicked.connect(self.edit_settings)
+        settings_button.setToolTip("常规、提醒与更新设置")
+        toolbar.addWidget(settings_button)
         layout.addLayout(toolbar)
 
         self.drop_label = QLabel(
@@ -1680,18 +1775,12 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("当前剪贴板不是可粘贴的文字或图片。请先按 Win+V 选择内容。", 4500)
 
-    def print_program_sheet(self) -> None:
-        """Print the current in-app sheet preview without requiring Excel."""
+    def _capture_sheet_for_printing(self) -> QPixmap | None:
+        """Capture the whole fixed template, including off-screen cells."""
 
         if self.preview.rowCount() == 0:
             self.show_error("无法打印", "当前没有可打印的程序单预览。")
-            return
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("打印 CNC 程序单")
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+            return None
         # Capture the complete fixed template, not merely the scrolled visible
         # portion of the table. This keeps the lower program rows and the
         # right-most columns in the paper output.
@@ -1706,6 +1795,12 @@ class MainWindow(QMainWindow):
         self.preview.resize(old_size)
         self.preview.horizontalScrollBar().setValue(old_horizontal)
         self.preview.verticalScrollBar().setValue(old_vertical)
+        return image
+
+    @staticmethod
+    def _paint_sheet_on_printer(printer: QPrinter, image: QPixmap) -> None:
+        """Scale the captured template onto the printer's printable area."""
+
         painter = QPainter(printer)
         try:
             page = printer.pageRect(QPrinter.Unit.DevicePixel)
@@ -1717,6 +1812,33 @@ class MainWindow(QMainWindow):
             )
         finally:
             painter.end()
+
+    def preview_program_sheet(self) -> None:
+        """Show the native Windows print-preview dialog before printing."""
+
+        image = self._capture_sheet_for_printing()
+        if image is None:
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        dialog = QPrintPreviewDialog(printer, self)
+        dialog.setWindowTitle("打印预览 - CNC 程序单")
+        dialog.paintRequested.connect(lambda target_printer: self._paint_sheet_on_printer(target_printer, image))
+        dialog.exec()
+
+    def print_program_sheet(self) -> None:
+        """Open the standard printer chooser and print the current sheet."""
+
+        image = self._capture_sheet_for_printing()
+        if image is None:
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("打印 CNC 程序单")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._paint_sheet_on_printer(printer, image)
         self.statusBar().showMessage("已发送到打印机。", 3500)
 
     def _clipboard_contains_nc_input(self) -> bool:
@@ -2402,15 +2524,33 @@ class MainWindow(QMainWindow):
     def _repository(self) -> str:
         return str(self.settings.get("update_repository") or load_embedded_update_repository()).strip()
 
-    def edit_update_settings(self) -> None:
-        dialog = SettingsDialog(self._repository(), self)
+    def edit_settings(self) -> None:
+        """Edit ordinary user preferences from the single Settings button."""
+
+        dialog = SettingsDialog(
+            self._repository(),
+            bool(self.settings.get("show_save_success_message", True)),
+            bool(self.settings.get("automatic_update_check", True)),
+            self,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["update_repository"] = dialog.repository.text().strip()
+            previous_reminder = bool(self.settings.get("show_save_success_message", True))
+            self.settings["show_save_success_message"] = dialog.save_reminder.isChecked()
+            self.settings["automatic_update_check"] = dialog.automatic_update_check.isChecked()
+            # Re-enabling save notifications should take effect on the next
+            # save even if this build has already shown its first-save notice.
+            if dialog.save_reminder.isChecked() and not previous_reminder:
+                self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
-            self.statusBar().showMessage("更新设置已保存。", 3500)
+            self.statusBar().showMessage("设置已保存。", 3500)
+
+    # Keep the old internal name available for any older integrations.
+    def edit_update_settings(self) -> None:
+        self.edit_settings()
 
     def _automatic_update_check(self) -> None:
-        if self._repository():
+        if self.settings.get("automatic_update_check", True) and self._repository():
             self.check_updates(silent=True)
 
     def check_updates(self, silent: bool) -> None:
