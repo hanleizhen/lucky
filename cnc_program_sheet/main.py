@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewDialog
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewWidget
 
 from .app_paths import (
     cache_pasted_nc_program,
@@ -770,6 +770,13 @@ class ExcelPreview(QTableWidget):
         self._theme_colors: list[str] = []
         self._image_overlays: dict[str, FloatingImageOverlay] = {}
         self._selected_image_id: str | None = None
+        # One history entry may contain an entire pasted/cleared rectangle.
+        # This makes Ctrl+Z feel like Excel rather than undoing one cell at a
+        # time after a multi-cell paste.
+        self._undo_stack: list[list[tuple[str, str, str]]] = []
+        self._redo_stack: list[list[tuple[str, str, str]]] = []
+        self._known_values: dict[str, str] = {}
+        self._history_applying = False
         # QTableWidget only contains an item at the top-left of an Excel
         # merged range.  Keep the mapping for every covered preview cell so
         # actions such as Ctrl+V still have a valid Excel anchor.
@@ -897,6 +904,7 @@ class ExcelPreview(QTableWidget):
             grid = source
         written = 0
         last_row, last_column = start_row, start_column
+        changes: list[tuple[str, str, str]] = []
         self._loading = True
         try:
             for row_offset, line in enumerate(grid):
@@ -907,15 +915,21 @@ class ExcelPreview(QTableWidget):
                     item = self.item(row, column)
                     if item is None or not (item.flags() & Qt.ItemFlag.ItemIsEditable):
                         continue
-                    item.setText(value)
                     coordinate = item.data(Qt.ItemDataRole.UserRole)
+                    previous = item.text()
+                    item.setText(value)
                     if coordinate:
+                        coordinate = str(coordinate)
+                        if previous != value:
+                            changes.append((coordinate, previous, value))
+                        self._known_values[coordinate] = value
                         self.cell_edited.emit(str(coordinate), value)
                     written += 1
                     last_row, last_column = max(last_row, row), max(last_column, column)
         finally:
             self._loading = False
         if written:
+            self._remember_edit(changes)
             self.clearSelection()
             self.setCurrentCell(start_row, start_column)
             self.setRangeSelected(QTableWidgetSelectionRange(start_row, start_column, last_row, last_column), True)
@@ -947,20 +961,103 @@ class ExcelPreview(QTableWidget):
         if selection is None:
             return
         top, left, bottom, right = selection
+        changes: list[tuple[str, str, str]] = []
         self._loading = True
         try:
             for row in range(top, bottom + 1):
                 for column in range(left, right + 1):
                     item = self.item(row, column)
                     if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
+                        previous = item.text()
                         item.setText("")
                         coordinate = item.data(Qt.ItemDataRole.UserRole)
                         if coordinate:
+                            coordinate = str(coordinate)
+                            if previous:
+                                changes.append((coordinate, previous, ""))
+                            self._known_values[coordinate] = ""
                             self.cell_edited.emit(str(coordinate), "")
         finally:
             self._loading = False
+        self._remember_edit(changes)
+
+    def _remember_edit(self, changes: list[tuple[str, str, str]]) -> None:
+        """Store one user gesture for Ctrl+Z/Ctrl+Y, omitting no-op cells."""
+
+        effective = [change for change in changes if change[1] != change[2]]
+        if not effective or self._history_applying:
+            return
+        self._undo_stack.append(effective)
+        # Keep history bounded so a very large clipboard paste never grows
+        # the application's memory indefinitely.
+        if len(self._undo_stack) > 100:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def clear_edit_history(self) -> None:
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+    def _sync_known_values(self) -> None:
+        self._known_values = {
+            str(item.data(Qt.ItemDataRole.UserRole)): item.text()
+            for row in range(self.rowCount())
+            for column in range(self.columnCount())
+            if (item := self.item(row, column)) is not None and item.data(Qt.ItemDataRole.UserRole)
+        }
+
+    def _item_for_coordinate(self, coordinate: str) -> QTableWidgetItem | None:
+        letters = "".join(character for character in coordinate if character.isalpha())
+        digits = "".join(character for character in coordinate if character.isdigit())
+        if not letters or not digits:
+            return None
+        column = 0
+        for character in letters:
+            column = column * 26 + ord(character) - 64
+        return self.item(int(digits) - 1, column - 1)
+
+    def _apply_history(self, changes: list[tuple[str, str, str]], use_previous: bool) -> None:
+        self._history_applying = True
+        self._loading = True
+        try:
+            ordered = reversed(changes) if use_previous else changes
+            for coordinate, previous, current in ordered:
+                item = self._item_for_coordinate(coordinate)
+                if item is None:
+                    continue
+                value = previous if use_previous else current
+                item.setText(value)
+                self._known_values[coordinate] = value
+                self.cell_edited.emit(coordinate, value)
+        finally:
+            self._loading = False
+            self._history_applying = False
+
+    def undo_edit(self) -> bool:
+        if not self._undo_stack:
+            return False
+        changes = self._undo_stack.pop()
+        self._apply_history(changes, use_previous=True)
+        self._redo_stack.append(changes)
+        return True
+
+    def redo_edit(self) -> bool:
+        if not self._redo_stack:
+            return False
+        changes = self._redo_stack.pop()
+        self._apply_history(changes, use_previous=False)
+        self._undo_stack.append(changes)
+        return True
 
     def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo_edit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo_edit()
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.Copy):
             self.copy_selected_cells()
             event.accept()
@@ -1036,6 +1133,7 @@ class ExcelPreview(QTableWidget):
                     item.setText("")
         finally:
             self._loading = False
+        self._sync_known_values()
 
     @staticmethod
     def _theme_palette(theme: bytes | None) -> list[str]:
@@ -1146,6 +1244,8 @@ class ExcelPreview(QTableWidget):
         finally:
             self._loading = False
             workbook.close()
+        self._sync_known_values()
+        self.clear_edit_history()
         QTimer.singleShot(0, self._reposition_image_overlays)
 
     @staticmethod
@@ -1170,6 +1270,7 @@ class ExcelPreview(QTableWidget):
         self._loading = True
         item.setText(value)
         self._loading = False
+        self._known_values[cell] = value
 
     def set_text_color(self, cell: str, color: QColor) -> None:
         """Change a preview cell's text color without replacing its style."""
@@ -1322,7 +1423,12 @@ class ExcelPreview(QTableWidget):
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         coordinate = item.data(Qt.ItemDataRole.UserRole)
         if not self._loading and coordinate:
-            self.cell_edited.emit(str(coordinate), item.text())
+            coordinate = str(coordinate)
+            previous = self._known_values.get(coordinate, "")
+            current = item.text()
+            self._known_values[coordinate] = current
+            self._remember_edit([(coordinate, previous, current)])
+            self.cell_edited.emit(coordinate, current)
 
 
 class SettingsDialog(QDialog):
@@ -1411,6 +1517,81 @@ class SaveDirectoryDialog(QDialog):
         selected = QFileDialog.getExistingDirectory(self, "选择程序单保存文件夹", self.directory.text())
         if selected:
             self.directory.setText(selected)
+
+
+class WheelZoomPrintPreview(QPrintPreviewWidget):
+    """Preview widget whose mouse wheel always changes the page scale."""
+
+    def wheelEvent(self, event: Any) -> None:
+        delta = event.angleDelta().y()
+        if not delta:
+            super().wheelEvent(event)
+            return
+        factor = self.zoomFactor() or 1.0
+        multiplier = 1.15 if delta > 0 else 1 / 1.15
+        self.setZoomFactor(max(0.15, min(8.0, factor * multiplier)))
+        event.accept()
+
+
+class ProgramSheetPrintPreviewDialog(QDialog):
+    """Printable sheet preview with explicit controls and wheel zoom."""
+
+    def __init__(self, printer: QPrinter, render_page: Callable[[QPrinter], None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._printer = printer
+        self._render_page = render_page
+        self.setWindowTitle("打印预览 - CNC 程序单")
+        self.resize(1020, 760)
+        root = QVBoxLayout(self)
+        note = QLabel("鼠标滚轮：放大/缩小　·　“适应页面”可恢复完整预览")
+        note.setStyleSheet("color: #335b7d;")
+        root.addWidget(note)
+        self.preview = WheelZoomPrintPreview(printer, self)
+        self.preview.setZoomMode(QPrintPreviewWidget.ZoomMode.FitInView)
+        self.preview.paintRequested.connect(self._render_page)
+        self.preview.previewChanged.connect(self._update_zoom_label)
+        root.addWidget(self.preview, 1)
+        controls = QHBoxLayout()
+        zoom_out = QPushButton("－")
+        zoom_out.setToolTip("缩小")
+        zoom_out.clicked.connect(lambda: self._change_zoom(1 / 1.15))
+        controls.addWidget(zoom_out)
+        zoom_in = QPushButton("＋")
+        zoom_in.setToolTip("放大")
+        zoom_in.clicked.connect(lambda: self._change_zoom(1.15))
+        controls.addWidget(zoom_in)
+        self.zoom_label = QLabel()
+        controls.addWidget(self.zoom_label)
+        fit_page = QPushButton("适应页面")
+        fit_page.clicked.connect(lambda: self.preview.setZoomMode(QPrintPreviewWidget.ZoomMode.FitInView))
+        controls.addWidget(fit_page)
+        fit_width = QPushButton("适应宽度")
+        fit_width.clicked.connect(lambda: self.preview.setZoomMode(QPrintPreviewWidget.ZoomMode.FitToWidth))
+        controls.addWidget(fit_width)
+        controls.addStretch(1)
+        print_button = QPushButton("打印")
+        print_button.setObjectName("primaryButton")
+        print_button.clicked.connect(self._print)
+        controls.addWidget(print_button)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.reject)
+        controls.addWidget(close_button)
+        root.addLayout(controls)
+        self._update_zoom_label()
+
+    def _change_zoom(self, multiplier: float) -> None:
+        factor = self.preview.zoomFactor() or 1.0
+        self.preview.setZoomFactor(max(0.15, min(8.0, factor * multiplier)))
+        self._update_zoom_label()
+
+    def _update_zoom_label(self) -> None:
+        self.zoom_label.setText(f"缩放：{round((self.preview.zoomFactor() or 1.0) * 100)}%")
+
+    def _print(self) -> None:
+        dialog = QPrintDialog(self._printer, self)
+        dialog.setWindowTitle("打印 CNC 程序单")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._render_page(self._printer)
 
 
 class MainWindow(QMainWindow):
@@ -1522,6 +1703,14 @@ class MainWindow(QMainWindow):
         reparse = QPushButton("重新解析")
         reparse.clicked.connect(self.reparse)
         toolbar.addWidget(reparse)
+        undo = QPushButton("撤销")
+        undo.clicked.connect(self.undo_preview_edit)
+        undo.setToolTip("撤销表格最后一次编辑（Ctrl+Z）")
+        toolbar.addWidget(undo)
+        redo = QPushButton("重做")
+        redo.clicked.connect(self.redo_preview_edit)
+        redo.setToolTip("重做表格最后一次撤销（Ctrl+Y）")
+        toolbar.addWidget(redo)
         clear = QPushButton("清空")
         clear.clicked.connect(self.clear_all)
         toolbar.addWidget(clear)
@@ -1775,6 +1964,18 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("当前剪贴板不是可粘贴的文字或图片。请先按 Win+V 选择内容。", 4500)
 
+    def undo_preview_edit(self) -> None:
+        if self.preview.undo_edit():
+            self.statusBar().showMessage("已撤销表格编辑。", 2500)
+        else:
+            self.statusBar().showMessage("没有可撤销的表格编辑。", 2500)
+
+    def redo_preview_edit(self) -> None:
+        if self.preview.redo_edit():
+            self.statusBar().showMessage("已重做表格编辑。", 2500)
+        else:
+            self.statusBar().showMessage("没有可重做的表格编辑。", 2500)
+
     def _capture_sheet_for_printing(self) -> QPixmap | None:
         """Capture the whole fixed template, including off-screen cells."""
 
@@ -1814,16 +2015,18 @@ class MainWindow(QMainWindow):
             painter.end()
 
     def preview_program_sheet(self) -> None:
-        """Show the native Windows print-preview dialog before printing."""
+        """Show a wheel-zoomable print preview before printing."""
 
         image = self._capture_sheet_for_printing()
         if image is None:
             return
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        dialog = QPrintPreviewDialog(printer, self)
-        dialog.setWindowTitle("打印预览 - CNC 程序单")
-        dialog.paintRequested.connect(lambda target_printer: self._paint_sheet_on_printer(target_printer, image))
+        dialog = ProgramSheetPrintPreviewDialog(
+            printer,
+            lambda target_printer: self._paint_sheet_on_printer(target_printer, image),
+            self,
+        )
         dialog.exec()
 
     def print_program_sheet(self) -> None:
@@ -2456,6 +2659,9 @@ class MainWindow(QMainWindow):
             self.manual_cells[coordinate] = marker
             self.preview.set_value(coordinate, marker)
             self.preview.set_text_color(coordinate, MARKER_RED)
+        # Imported/reparsed NC values are a new baseline, so undo only ever
+        # affects the operator's edits made after this refresh.
+        self.preview.clear_edit_history()
         self._set_result_table()
 
     def _set_result_table(self) -> None:

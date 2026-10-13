@@ -72,3 +72,35 @@ def test_preview_single_value_fills_the_selected_rectangle_like_excel() -> None:
     assert len(preview.selectedIndexes()) == 4
     preview.close()
     assert app is not None
+
+
+def test_preview_undo_and_redo_keep_a_single_cell_edit_in_sync() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.set_value("B7", "修改前")
+
+    item = preview.item(6, 1)
+    assert item is not None
+    item.setText("修改后")
+    assert preview.undo_edit()
+    assert item.text() == "修改前"
+    assert preview.redo_edit()
+    assert item.text() == "修改后"
+    preview.close()
+    assert app is not None
+
+
+def test_preview_undo_restores_an_entire_pasted_range() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.set_value("B7", "旧B")
+    preview.set_value("C7", "旧C")
+    preview.setCurrentCell(6, 1)
+
+    assert preview.paste_text_grid("新B\t新C") == 2
+    assert preview.undo_edit()
+    assert (preview.item(6, 1).text(), preview.item(6, 2).text()) == ("旧B", "旧C")
+    preview.close()
+    assert app is not None
