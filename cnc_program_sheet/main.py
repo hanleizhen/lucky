@@ -763,6 +763,7 @@ class ExcelPreview(QTableWidget):
     delete_cells_requested = Signal(int, int, int, int)
     image_geometry_changed = Signal(str, str, int, int, int, int)
     image_delete_requested = Signal(str)
+    find_replace_requested = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -825,6 +826,9 @@ class ExcelPreview(QTableWidget):
             return
         self.setCurrentCell(index.row(), index.column())
         menu = QMenu(self)
+        find_replace = menu.addAction("查找/替换…")
+        find_replace.triggered.connect(lambda: self.find_replace_requested.emit(True))
+        menu.addSeparator()
         paste = menu.addAction("粘贴（先在 Win+V 选择内容）")
         paste.triggered.connect(self.clipboard_table_paste_requested)
         copy_action = menu.addAction("复制")
@@ -1049,7 +1053,90 @@ class ExcelPreview(QTableWidget):
         self._undo_stack.append(changes)
         return True
 
+    def _editable_items(self) -> list[tuple[int, int, QTableWidgetItem]]:
+        """Return editable cells in normal spreadsheet reading order."""
+
+        return [
+            (row, column, item)
+            for row in range(self.rowCount())
+            for column in range(self.columnCount())
+            if (item := self.item(row, column)) is not None and item.flags() & Qt.ItemFlag.ItemIsEditable
+        ]
+
+    def find_next(self, text: str, match_case: bool = False) -> str | None:
+        """Select the next matching editable cell, wrapping at the end."""
+
+        if not text:
+            return None
+        items = self._editable_items()
+        if not items:
+            return None
+        needle = text if match_case else text.casefold()
+        current = (self.currentRow(), self.currentColumn())
+        start = next((index for index, (row, column, _) in enumerate(items) if (row, column) == current), -1)
+        for offset in range(1, len(items) + 1):
+            row, column, item = items[(start + offset) % len(items)]
+            haystack = item.text() if match_case else item.text().casefold()
+            if needle in haystack:
+                self.clearSelection()
+                self.setCurrentCell(row, column)
+                self.setRangeSelected(QTableWidgetSelectionRange(row, column, row, column), True)
+                self.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                return str(item.data(Qt.ItemDataRole.UserRole) or "")
+        return None
+
+    @staticmethod
+    def _replace_text(value: str, find_text: str, replacement: str, match_case: bool) -> tuple[str, int]:
+        flags = 0 if match_case else re.IGNORECASE
+        return re.subn(re.escape(find_text), replacement, value, flags=flags)
+
+    def replace_current(self, find_text: str, replacement: str, match_case: bool = False) -> bool:
+        """Replace matches in the active editable cell as one normal edit."""
+
+        item = self.currentItem()
+        if not find_text or item is None or not (item.flags() & Qt.ItemFlag.ItemIsEditable):
+            return False
+        value, count = self._replace_text(item.text(), find_text, replacement, match_case)
+        if not count:
+            return False
+        item.setText(value)
+        return True
+
+    def replace_all(self, find_text: str, replacement: str, match_case: bool = False) -> int:
+        """Replace across editable cells and keep the full action undoable."""
+
+        if not find_text:
+            return 0
+        changes: list[tuple[str, str, str]] = []
+        replaced_cells = 0
+        self._loading = True
+        try:
+            for _, _, item in self._editable_items():
+                previous = item.text()
+                current, count = self._replace_text(previous, find_text, replacement, match_case)
+                coordinate = item.data(Qt.ItemDataRole.UserRole)
+                if not count or not coordinate:
+                    continue
+                coordinate = str(coordinate)
+                item.setText(current)
+                self._known_values[coordinate] = current
+                self.cell_edited.emit(coordinate, current)
+                changes.append((coordinate, previous, current))
+                replaced_cells += 1
+        finally:
+            self._loading = False
+        self._remember_edit(changes)
+        return replaced_cells
+
     def keyPressEvent(self, event: Any) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
+            self.find_replace_requested.emit(False)
+            event.accept()
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_H:
+            self.find_replace_requested.emit(True)
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.Undo):
             self.undo_edit()
             event.accept()
@@ -1439,6 +1526,9 @@ class SettingsDialog(QDialog):
         current_repository: str,
         show_save_reminder: bool,
         automatic_update_check: bool,
+        confirm_before_clear: bool,
+        confirm_before_save: bool,
+        open_folder_after_save: bool,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1450,6 +1540,12 @@ class SettingsDialog(QDialog):
         self.save_reminder.setChecked(show_save_reminder)
         self.automatic_update_check = QCheckBox("启动后及后台自动检查更新")
         self.automatic_update_check.setChecked(automatic_update_check)
+        self.confirm_before_clear = QCheckBox("清空已导入内容前要求确认")
+        self.confirm_before_clear.setChecked(confirm_before_clear)
+        self.confirm_before_save = QCheckBox("保存程序单前显示确认窗口")
+        self.confirm_before_save.setChecked(confirm_before_save)
+        self.open_folder_after_save = QCheckBox("保存完成后打开所在文件夹")
+        self.open_folder_after_save.setChecked(open_folder_after_save)
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -1461,8 +1557,19 @@ class SettingsDialog(QDialog):
         general_note = QLabel("程序模板、保存位置、图片与个人设置均保存在本机 AppData；升级软件不会删除这些内容。")
         general_note.setWordWrap(True)
         general_layout.addWidget(general_note)
+        general_layout.addWidget(self.open_folder_after_save)
         general_layout.addStretch(1)
         tabs.addTab(general, "常规")
+
+        editing = QWidget()
+        editing_layout = QVBoxLayout(editing)
+        editing_layout.addWidget(self.confirm_before_clear)
+        editing_layout.addWidget(self.confirm_before_save)
+        editing_note = QLabel("表格支持 Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+F 查找、Ctrl+H 替换；也可在表格中右键打开查找/替换。")
+        editing_note.setWordWrap(True)
+        editing_layout.addWidget(editing_note)
+        editing_layout.addStretch(1)
+        tabs.addTab(editing, "编辑")
 
         reminders = QWidget()
         reminder_layout = QVBoxLayout(reminders)
@@ -1486,6 +1593,82 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+
+class FindReplaceDialog(QDialog):
+    """Small Excel-like find/replace panel for the editable preview sheet."""
+
+    def __init__(self, preview: ExcelPreview, replace_mode: bool = True, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.preview = preview
+        self.setWindowTitle("查找和替换")
+        self.setMinimumWidth(410)
+        self.find_text = QLineEdit()
+        self.find_text.setPlaceholderText("输入要查找的内容")
+        self.replace_text = QLineEdit()
+        self.replace_text.setPlaceholderText("输入替换后的内容")
+        self.match_case = QCheckBox("区分大小写")
+        self.status = QLabel("在右侧表格的可编辑单元格中查找。")
+        self.status.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow("查找内容：", self.find_text)
+        form.addRow("替换为：", self.replace_text)
+        form.addRow("", self.match_case)
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(self.status)
+        actions = QHBoxLayout()
+        find_next = QPushButton("查找下一个")
+        find_next.clicked.connect(self.find_next)
+        actions.addWidget(find_next)
+        replace = QPushButton("替换")
+        replace.clicked.connect(self.replace_current)
+        actions.addWidget(replace)
+        replace_all = QPushButton("全部替换")
+        replace_all.clicked.connect(self.replace_all)
+        actions.addWidget(replace_all)
+        actions.addStretch(1)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.close)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        if not replace_mode:
+            self.replace_text.setFocus()
+            self.find_text.setFocus()
+        else:
+            self.find_text.setFocus()
+
+    def _find_value(self) -> str:
+        return self.find_text.text()
+
+    def find_next(self) -> None:
+        text = self._find_value()
+        if not text:
+            self.status.setText("请先输入要查找的内容。")
+            self.find_text.setFocus()
+            return
+        coordinate = self.preview.find_next(text, self.match_case.isChecked())
+        self.status.setText(f"已定位到 {coordinate}。" if coordinate else f"没有找到“{text}”。")
+
+    def replace_current(self) -> None:
+        text = self._find_value()
+        if not text:
+            self.find_next()
+            return
+        if self.preview.replace_current(text, self.replace_text.text(), self.match_case.isChecked()):
+            self.status.setText("已替换当前单元格，可按 Ctrl+Z 撤销。")
+        else:
+            self.status.setText("当前单元格没有可替换的内容，已继续查找。")
+            self.find_next()
+
+    def replace_all(self) -> None:
+        text = self._find_value()
+        if not text:
+            self.find_next()
+            return
+        count = self.preview.replace_all(text, self.replace_text.text(), self.match_case.isChecked())
+        self.status.setText(f"已在 {count} 个单元格中完成替换，可按 Ctrl+Z 撤销。" if count else f"没有找到“{text}”。")
 
 
 class SaveDirectoryDialog(QDialog):
@@ -1711,6 +1894,10 @@ class MainWindow(QMainWindow):
         redo.clicked.connect(self.redo_preview_edit)
         redo.setToolTip("重做表格最后一次撤销（Ctrl+Y）")
         toolbar.addWidget(redo)
+        find_replace = QPushButton("查找替换")
+        find_replace.clicked.connect(lambda: self.open_find_replace(True))
+        find_replace.setToolTip("在程序单中查找或批量替换内容（Ctrl+F / Ctrl+H）")
+        toolbar.addWidget(find_replace)
         clear = QPushButton("清空")
         clear.clicked.connect(self.clear_all)
         toolbar.addWidget(clear)
@@ -1795,6 +1982,7 @@ class MainWindow(QMainWindow):
         self.preview.clipboard_table_paste_requested.connect(self.paste_table_from_clipboard)
         self.preview.image_geometry_changed.connect(self._update_image_geometry)
         self.preview.image_delete_requested.connect(self._remove_image_by_id)
+        self.preview.find_replace_requested.connect(self.open_find_replace)
         # Child widgets normally consume Ctrl+V themselves. Intercept it
         # before an Excel/result cell can interpret copied NC code as plain
         # text, while leaving ordinary text paste untouched for editing.
@@ -2592,7 +2780,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("已按原始 NC 文件重新解析。", 3500)
 
     def clear_all(self) -> None:
-        if self._has_imported_records() and QMessageBox.question(self, "清空", "清空已导入文件及当前预览中的手动修改？") != QMessageBox.StandardButton.Yes:
+        if (
+            self._has_imported_records()
+            and self.settings.get("confirm_before_clear", True)
+            and QMessageBox.question(self, "清空", "清空已导入文件及当前预览中的手动修改？") != QMessageBox.StandardButton.Yes
+        ):
             return
         self.records.clear()
         self.row_markers.clear()
@@ -2737,6 +2929,9 @@ class MainWindow(QMainWindow):
             self._repository(),
             bool(self.settings.get("show_save_success_message", True)),
             bool(self.settings.get("automatic_update_check", True)),
+            bool(self.settings.get("confirm_before_clear", True)),
+            bool(self.settings.get("confirm_before_save", False)),
+            bool(self.settings.get("open_folder_after_save", False)),
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2744,12 +2939,21 @@ class MainWindow(QMainWindow):
             previous_reminder = bool(self.settings.get("show_save_success_message", True))
             self.settings["show_save_success_message"] = dialog.save_reminder.isChecked()
             self.settings["automatic_update_check"] = dialog.automatic_update_check.isChecked()
+            self.settings["confirm_before_clear"] = dialog.confirm_before_clear.isChecked()
+            self.settings["confirm_before_save"] = dialog.confirm_before_save.isChecked()
+            self.settings["open_folder_after_save"] = dialog.open_folder_after_save.isChecked()
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
             self.statusBar().showMessage("设置已保存。", 3500)
+
+    def open_find_replace(self, replace_mode: bool = True) -> None:
+        """Show non-destructive Excel-style find/replace for the sheet preview."""
+
+        dialog = FindReplaceDialog(self.preview, replace_mode, self)
+        dialog.exec()
 
     # Keep the old internal name available for any older integrations.
     def edit_update_settings(self) -> None:
@@ -2894,6 +3098,10 @@ class MainWindow(QMainWindow):
                 output_directory,
                 document_name=self.manual_cells.get(LAYOUT.output_name_cell, ""),
             )
+            if self.settings.get("confirm_before_save", False):
+                answer = QMessageBox.question(self, "确认保存", f"确认保存程序单到：\n{target}？")
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             export_workbook(
                 self.template_path,
                 target,
@@ -2902,6 +3110,8 @@ class MainWindow(QMainWindow):
                 red_text_cells=[LAYOUT.target_cell("program_name", index) for index in self.row_markers],
             )
             self._show_save_success(target)
+            if self.settings.get("open_folder_after_save", False) and sys.platform == "win32":
+                os.startfile(str(target.parent))
         except Exception as exc:
             self.show_error("保存程序单失败", str(exc))
 

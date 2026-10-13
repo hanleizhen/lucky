@@ -104,3 +104,34 @@ def test_preview_undo_restores_an_entire_pasted_range() -> None:
     assert (preview.item(6, 1).text(), preview.item(6, 2).text()) == ("旧B", "旧C")
     preview.close()
     assert app is not None
+
+
+def test_preview_find_and_replace_all_are_undoable() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.set_value("B7", "查找标记-12.NC")
+    preview.set_value("B8", "查找标记-13.NC")
+    preview.setCurrentCell(6, 1)
+
+    assert preview.find_next("13.NC") == "B8"
+    assert (preview.currentRow(), preview.currentColumn()) == (7, 1)
+    assert preview.replace_all("查找标记-", "NC-") == 2
+    assert (preview.item(6, 1).text(), preview.item(7, 1).text()) == ("NC-12.NC", "NC-13.NC")
+    assert preview.undo_edit()
+    assert (preview.item(6, 1).text(), preview.item(7, 1).text()) == ("查找标记-12.NC", "查找标记-13.NC")
+    preview.close()
+    assert app is not None
+
+
+def test_preview_replace_current_ignores_case_when_requested() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.set_value("B7", "Tool-data")
+    preview.setCurrentCell(6, 1)
+
+    assert preview.replace_current("TOOL", "程序", match_case=False)
+    assert preview.item(6, 1).text() == "程序-data"
+    preview.close()
+    assert app is not None
