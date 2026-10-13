@@ -44,15 +44,15 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M06"; ValueType: string; ValueName: "MUIVerb"; ValueData: "CNC 智能程序单 - M06 修改"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M06"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\CNCProgramSheet_icon_{#MyAppVersion}.ico,0"
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M06"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M06\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform M06 ""%*"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M06\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform M06 %*"
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M304"; ValueType: string; ValueName: "MUIVerb"; ValueData: "CNC 智能程序单 - M304 修改"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M304"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\CNCProgramSheet_icon_{#MyAppVersion}.ico,0"
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M304"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M304\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform M304 ""%*"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.M304\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform M304 %*"
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.Copper"; ValueType: string; ValueName: "MUIVerb"; ValueData: "CNC 智能程序单 - 铜工修改"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.Copper"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\CNCProgramSheet_icon_{#MyAppVersion}.ico,0"
 Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.Copper"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.Copper\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform TG ""%*"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.nc\shell\CNCProgramSheet.Copper\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" --shell-transform TG %*"
 
 [InstallDelete]
 ; Recreate the current shortcuts so their IconFilename is refreshed.  The app

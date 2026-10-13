@@ -51,7 +51,7 @@ def test_explorer_context_menu_commands_are_registered_per_user_for_multi_select
     for mode, label in ((M06, "M06 修改"), (M304, "M304 修改"), (TG, "铜工修改")):
         assert "Root: HKCU; Subkey: \"Software\\Classes\\SystemFileAssociations\\.nc\\shell\\CNCProgramSheet." in installer
         assert f"CNC 智能程序单 - {label}" in installer
-        assert f'--shell-transform {mode.value} ""%*""' in installer
+        assert f'--shell-transform {mode.value} %*"' in installer
     assert installer.count('ValueName: "MultiSelectModel"; ValueData: "Player"') == 3
 
 

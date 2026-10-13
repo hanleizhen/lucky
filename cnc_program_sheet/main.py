@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, 
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -1234,6 +1235,9 @@ class MainWindow(QMainWindow):
         self._program_area_reset = False
         self._result_loading = False
         self._update_worker: Worker | None = None
+        # An update installer must be allowed to close the running process
+        # without the ordinary user-facing close/minimize question.
+        self._exiting_for_update = False
         self.setWindowTitle(f"{APP_NAME}  v{__version__}")
         icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))
         if not icon.isNull():
@@ -2218,6 +2222,7 @@ class MainWindow(QMainWindow):
         try:
             start_installer_after_exit(installer)
             QMessageBox.information(self, "开始升级", "已下载并校验更新。程序关闭后将自动安装新版。")
+            self._exiting_for_update = True
             QApplication.instance().quit()
         except Exception as exc:
             self.show_error("无法启动更新安装程序", str(exc))
@@ -2309,19 +2314,78 @@ class MainWindow(QMainWindow):
             self.show_error("保存程序单失败", str(exc))
 
     def _show_save_success(self, target: Path) -> None:
+        if self.settings.get("show_save_success_message", True) is False:
+            self.statusBar().showMessage(f"程序单已保存：{target}", 5000)
+            return
         box = QMessageBox(self)
         box.setWindowTitle("程序单保存成功")
         box.setIcon(QMessageBox.Icon.Information)
         box.setText("程序单保存成功")
         box.setInformativeText(str(target))
+        never_remind = QCheckBox("永不提醒")
+        box.setCheckBox(never_remind)
         open_file = box.addButton("打开文件", QMessageBox.ButtonRole.AcceptRole)
         open_folder = box.addButton("打开文件夹", QMessageBox.ButtonRole.ActionRole)
         box.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
         box.exec()
+        if never_remind.isChecked():
+            self.settings["show_save_success_message"] = False
+            save_settings(self.settings)
         if box.clickedButton() is open_file:
             os.startfile(target)  # type: ignore[attr-defined]
         elif box.clickedButton() is open_folder:
             os.startfile(target.parent)  # type: ignore[attr-defined]
+
+    def closeEvent(self, event: Any) -> None:
+        """Ask a visible user whether X should minimize or quit.
+
+        The remembered choice intentionally lives with other user settings in
+        LocalAppData, so upgrades never reset it.  Unit-test windows are not
+        shown; accepting those invisible closes keeps test cleanup non-modal.
+        """
+
+        application = QApplication.instance()
+        # The offscreen Qt backend is used only by automated tests. It has no
+        # taskbar to minimize to and must never wait for a human response.
+        if (
+            self._exiting_for_update
+            or not self.isVisible()
+            or (application is not None and application.platformName().casefold() == "offscreen")
+        ):
+            event.accept()
+            return
+        remembered = str(self.settings.get("close_window_behavior", ""))
+        if remembered == "minimize":
+            event.ignore()
+            self.showMinimized()
+            return
+        if remembered == "exit":
+            event.accept()
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("关闭 CNC 智能程序单")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("要缩小到任务栏，还是直接退出软件？")
+        never_remind = QCheckBox("永不提醒")
+        box.setCheckBox(never_remind)
+        minimize = box.addButton("缩小到任务栏", QMessageBox.ButtonRole.AcceptRole)
+        exit_program = box.addButton("直接退出", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        selected = box.clickedButton()
+        if selected is minimize:
+            if never_remind.isChecked():
+                self.settings["close_window_behavior"] = "minimize"
+                save_settings(self.settings)
+            event.ignore()
+            self.showMinimized()
+        elif selected is exit_program:
+            if never_remind.isChecked():
+                self.settings["close_window_behavior"] = "exit"
+                save_settings(self.settings)
+            event.accept()
+        else:
+            event.ignore()
 
     def show_error(self, title: str, details: str) -> None:
         log_path = log_exception(f"{title}\n{details}")
