@@ -13,7 +13,7 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -1242,6 +1243,7 @@ class MainWindow(QMainWindow):
         icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))
         if not icon.isNull():
             self.setWindowIcon(icon)
+        self._setup_system_tray(icon)
         self.setMinimumSize(1180, 720)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -1251,6 +1253,54 @@ class MainWindow(QMainWindow):
         self._background_update_timer.setInterval(6 * 60 * 60 * 1000)
         self._background_update_timer.timeout.connect(self._automatic_update_check)
         self._background_update_timer.start()
+
+    def _setup_system_tray(self, icon: QIcon) -> None:
+        """Provide the Windows lower-right notification-area application icon."""
+
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip(APP_NAME)
+        menu = QMenu(self)
+        restore = QAction("显示主窗口", self)
+        restore.triggered.connect(self._restore_from_tray)
+        quit_action = QAction("退出软件", self)
+        quit_action.triggered.connect(self._quit_from_tray)
+        menu.addAction(restore)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon.show()
+
+    def _hide_to_tray(self) -> None:
+        """Hide the main window and leave only its lower-right tray icon."""
+
+        if self.tray_icon.isVisible():
+            self.hide()
+            self.tray_icon.showMessage(
+                APP_NAME,
+                "软件已缩小到电脑右下角隐藏图标区。双击图标可恢复窗口。",
+                QSystemTrayIcon.MessageIcon.Information,
+                2500,
+            )
+        else:
+            # A notification area is normally present on Windows. Keep a
+            # usable fallback if a special shell session does not expose one.
+            self.showMinimized()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self._exiting_for_update = True
+        self.tray_icon.hide()
+        QApplication.instance().quit()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
+            self._restore_from_tray()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -2357,7 +2407,7 @@ class MainWindow(QMainWindow):
         remembered = str(self.settings.get("close_window_behavior", ""))
         if remembered == "minimize":
             event.ignore()
-            self.showMinimized()
+            self._hide_to_tray()
             return
         if remembered == "exit":
             event.accept()
@@ -2366,10 +2416,10 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("关闭 CNC 智能程序单")
         box.setIcon(QMessageBox.Icon.Question)
-        box.setText("要缩小到任务栏，还是直接退出软件？")
+        box.setText("要缩小到电脑右下角隐藏图标区，还是直接退出软件？")
         never_remind = QCheckBox("永不提醒")
         box.setCheckBox(never_remind)
-        minimize = box.addButton("缩小到任务栏", QMessageBox.ButtonRole.AcceptRole)
+        minimize = box.addButton("缩小到右下角隐藏图标区", QMessageBox.ButtonRole.AcceptRole)
         exit_program = box.addButton("直接退出", QMessageBox.ButtonRole.DestructiveRole)
         box.exec()
         selected = box.clickedButton()
@@ -2378,7 +2428,7 @@ class MainWindow(QMainWindow):
                 self.settings["close_window_behavior"] = "minimize"
                 save_settings(self.settings)
             event.ignore()
-            self.showMinimized()
+            self._hide_to_tray()
         elif selected is exit_program:
             if never_remind.isChecked():
                 self.settings["close_window_behavior"] = "exit"

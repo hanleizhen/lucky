@@ -17,10 +17,8 @@ from __future__ import annotations
 import locale
 import os
 import re
-import sys
 from enum import Enum
 from pathlib import Path
-from typing import Iterable
 
 
 class TransformMode(str, Enum):
@@ -239,75 +237,3 @@ def transform_file(
 
     source.write_bytes(encode_windows_default(output_text, encoding=encoding))
     return source
-
-
-def is_explorer_transform_request(arguments: Iterable[str] | None = None) -> bool:
-    """Return whether this process was started from an Explorer context menu."""
-
-    return any(
-        argument == "--shell-transform" or argument.startswith("--shell-transform=")
-        for argument in (list(arguments) if arguments is not None else sys.argv[1:])
-    )
-
-
-def run_explorer_transform(arguments: Iterable[str] | None = None) -> int:
-    """Run a no-window Explorer context-menu conversion.
-
-    The Inno Setup registration passes ``--shell-transform MODE %*``.  This
-    deliberately imports no Qt classes and shows no dialog, so selecting one
-    or several NC files in Explorer can invoke the exact established M06,
-    M304, or copper conversion in the background.  Errors are recorded in the
-    normal user-owned error log rather than being lost in a hidden process.
-    """
-
-    command_line = list(arguments) if arguments is not None else sys.argv[1:]
-    errors: list[str] = []
-    try:
-        switch_index = next(
-            index
-            for index, argument in enumerate(command_line)
-            if argument == "--shell-transform" or argument.startswith("--shell-transform=")
-        )
-        switch = command_line[switch_index]
-        if switch == "--shell-transform":
-            mode_text = command_line[switch_index + 1]
-            raw_paths = command_line[switch_index + 2 :]
-        else:
-            mode_text = switch.partition("=")[2]
-            raw_paths = command_line[switch_index + 1 :]
-        selected = _coerce_mode(mode_text)
-    except (StopIteration, IndexError, ValueError) as exc:
-        errors.append(f"右键命令参数无效：{exc}")
-        selected = None
-        raw_paths = []
-
-    if not raw_paths and not errors:
-        errors.append("未收到要修改的 NC 文件。")
-
-    for raw_path in raw_paths:
-        source = Path(raw_path)
-        try:
-            # Explorer verbs are registered only for .NC/.nc.  Keeping this
-            # check here prevents a manually constructed command line from
-            # unexpectedly modifying a non-NC document via the M304 rule.
-            if source.suffix.casefold() != ".nc":
-                raise ValueError("不是 .NC / .nc 文件")
-            if not source.is_file():
-                raise FileNotFoundError("文件不存在或无法访问")
-            transform_file(source, selected)  # type: ignore[arg-type]
-        except Exception as exc:
-            errors.append(f"{source}: {exc}")
-
-    if errors:
-        # Import lazily so the conversion mode remains free of application
-        # startup/UI dependencies.  LocalAppData logs survive application
-        # upgrades and provide a concrete troubleshooting path if Explorer
-        # starts a command with an invalid file selection.
-        from .app_paths import log_exception
-
-        log_exception(
-            "资源管理器右键 NC 修改失败（"
-            f"{selected.value if selected is not None else '未知方式'}）：\n" + "\n".join(errors)
-        )
-        return 1
-    return 0
