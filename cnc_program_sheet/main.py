@@ -1368,7 +1368,7 @@ class Toolpath3DView(QWidget):
             return None
         minimum, maximum = bounds
         center = tuple((minimum[index] + maximum[index]) / 2.0 for index in range(3))
-        extent = max(maximum[index] - minimum[index] for index in range(3), 1.0)
+        extent = max((maximum[index] - minimum[index] for index in range(3)), default=1.0)
         scale = min(self.width(), self.height()) * 0.76 * self.zoom / extent
         cos_yaw, sin_yaw = __import__("math").cos(self.yaw), __import__("math").sin(self.yaw)
         cos_pitch, sin_pitch = __import__("math").cos(self.pitch), __import__("math").sin(self.pitch)
