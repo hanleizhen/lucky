@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import cnc_program_sheet.main as app_main
 from PIL import Image
+from cnc_program_sheet.nc_transform import M06, M304, TG, is_explorer_transform_request, run_explorer_transform
 from cnc_program_sheet.version import APP_USER_MODEL_ID
 
 
@@ -42,3 +43,46 @@ def test_application_icon_has_a_genuinely_transparent_background() -> None:
             alpha = image.convert("RGBA").getchannel("A")
             assert alpha.getextrema()[0] == 0
             assert alpha.getpixel((0, 0)) == 0
+
+
+def test_explorer_context_menu_commands_are_registered_per_user_for_multi_select() -> None:
+    installer = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    for mode, label in ((M06, "M06 修改"), (M304, "M304 修改"), (TG, "铜工修改")):
+        assert "Root: HKCU; Subkey: \"Software\\Classes\\SystemFileAssociations\\.nc\\shell\\CNCProgramSheet." in installer
+        assert f"CNC 智能程序单 - {label}" in installer
+        assert f'--shell-transform {mode.value} ""%*""' in installer
+    assert installer.count('ValueName: "MultiSelectModel"; ValueData: "Player"') == 3
+
+
+def test_explorer_transform_runs_without_gui_and_applies_selected_files(tmp_path: Path) -> None:
+    first = tmp_path / "one.NC"
+    second = tmp_path / "two.nc"
+    first.write_text("N10 M6\nN20 G0 X0\n", encoding="ascii")
+    second.write_text("N30 M3\n", encoding="ascii")
+
+    assert is_explorer_transform_request(["--shell-transform", "M06", str(first)])
+    assert run_explorer_transform(["--shell-transform", "M06", str(first), str(second)]) == 0
+    assert first.read_bytes() == b"N20 G0 X0\r\n"
+    assert second.read_bytes() == b"N30 M3\r\n"
+
+
+def test_explorer_transform_allows_a_dash_prefixed_nc_filename(tmp_path: Path) -> None:
+    source = tmp_path / "-one.NC"
+    source.write_text("N10 M6\n", encoding="ascii")
+
+    assert run_explorer_transform(["--shell-transform=M06", str(source)]) == 0
+    assert source.read_bytes() == b"\r\n"
+
+
+def test_explorer_transform_rejects_non_nc_documents(tmp_path: Path, monkeypatch) -> None:
+    document = tmp_path / "not_nc.txt"
+    document.write_text("M6", encoding="ascii")
+    logged: list[str] = []
+
+    import cnc_program_sheet.app_paths as app_paths
+
+    monkeypatch.setattr(app_paths, "log_exception", lambda message: logged.append(message))
+    assert run_explorer_transform(["--shell-transform", "M06", str(document)]) == 1
+    assert document.read_text(encoding="ascii") == "M6"
+    assert "不是 .NC / .nc 文件" in logged[0]

@@ -1,7 +1,14 @@
-from cnc_program_sheet.main import _exception_hook, run, self_check
-
 if __name__ == "__main__":
     import sys
+
+    # Explorer context-menu actions must stay genuinely background-only: do
+    # not import PySide6 or create the main window for a one-click NC rewrite.
+    from cnc_program_sheet.nc_transform import is_explorer_transform_request, run_explorer_transform
+
+    if is_explorer_transform_request():
+        raise SystemExit(run_explorer_transform())
+
+    from cnc_program_sheet.main import _exception_hook, run, self_check
 
     debug_marker = __import__("os").environ.get("CNC_PROGRAM_SHEET_SELF_CHECK_MARKER")
     if debug_marker:
