@@ -2113,6 +2113,14 @@ class MainWindow(QMainWindow):
         self._shift_tracked_program_cells(index, 1)
         self._shift_program_images(index, 1)
         self._shift_marker_rows_for_insert(index)
+        # ``shift_program_row_values`` has moved the old NC-generated values
+        # down with the rest of the visible row.  A newly inserted spacer must
+        # explicitly clear only those generated columns; other operator edits
+        # elsewhere in the sheet remain untouched on later re-parses.
+        for field in LAYOUT.columns:
+            coordinate = LAYOUT.target_cell(field, index)
+            self.manual_cells[coordinate] = ""
+            self.preview.set_value(coordinate, "")
         self.records.insert(index, None)
         if marker:
             self.row_markers[index] = marker
