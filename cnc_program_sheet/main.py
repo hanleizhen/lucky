@@ -107,6 +107,20 @@ CONVERSION_TITLES = {
     TransformMode.M304: "M304 程序修改",
     TransformMode.COPPER: "铜工程序修改",
 }
+OPTIONAL_TOOLBAR_BUTTONS: tuple[tuple[str, str], ...] = (
+    ("save_location", "保存位置"),
+    ("reparse", "重新解析"),
+    ("undo", "撤销"),
+    ("redo", "重做"),
+    ("find_replace", "查找替换"),
+    ("clear", "清空"),
+    ("template", "打开模板"),
+    ("print", "打印"),
+    ("m06", "M06"),
+    ("m304", "M304"),
+    ("copper", "铜工"),
+    ("updates", "检查更新"),
+)
 
 
 def natural_program_sort_key(name: str) -> tuple[object, ...]:
@@ -1531,11 +1545,12 @@ class SettingsDialog(QDialog):
         confirm_before_clear: bool,
         confirm_before_save: bool,
         open_folder_after_save: bool,
+        toolbar_visibility: dict[str, bool],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(480, 310)
+        self.resize(520, 355)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
@@ -1572,6 +1587,26 @@ class SettingsDialog(QDialog):
         editing_layout.addWidget(editing_note)
         editing_layout.addStretch(1)
         tabs.addTab(editing, "编辑")
+
+        toolbar_page = QWidget()
+        toolbar_layout = QVBoxLayout(toolbar_page)
+        toolbar_note = QLabel("取消勾选后，按钮会立刻从顶部工具栏隐藏；需要时可随时回到“设置”重新勾选。完成并保存、选择 NC 文件、设置会始终保留。")
+        toolbar_note.setWordWrap(True)
+        toolbar_layout.addWidget(toolbar_note)
+        self.toolbar_buttons: dict[str, QCheckBox] = {}
+        check_rows = QHBoxLayout()
+        left_checks = QVBoxLayout()
+        right_checks = QVBoxLayout()
+        for index, (key, label) in enumerate(OPTIONAL_TOOLBAR_BUTTONS):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(toolbar_visibility.get(key, True))
+            self.toolbar_buttons[key] = checkbox
+            (left_checks if index < (len(OPTIONAL_TOOLBAR_BUTTONS) + 1) // 2 else right_checks).addWidget(checkbox)
+        check_rows.addLayout(left_checks)
+        check_rows.addLayout(right_checks)
+        toolbar_layout.addLayout(check_rows)
+        toolbar_layout.addStretch(1)
+        tabs.addTab(toolbar_page, "工具栏")
 
         reminders = QWidget()
         reminder_layout = QVBoxLayout(reminders)
@@ -1721,7 +1756,11 @@ class WheelZoomPrintPreview(QPrintPreviewWidget):
 class PrinterSelectionDialog(QDialog):
     """Choose a Windows printer without opening the unsupported OS preview."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        orientation: QPageLayout.Orientation = QPageLayout.Orientation.Landscape,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("选择打印机")
         self.setMinimumWidth(380)
@@ -1736,11 +1775,19 @@ class PrinterSelectionDialog(QDialog):
         self.copies = QSpinBox()
         self.copies.setRange(1, 99)
         self.copies.setValue(1)
+        self.orientation = QComboBox()
+        # The page-shaped symbols make the choice recognisable at a glance,
+        # while retaining the Chinese label for unambiguous operation.
+        self.orientation.addItem("▯ 竖向（Portrait）", QPageLayout.Orientation.Portrait)
+        self.orientation.addItem("▭ 横向（Landscape）", QPageLayout.Orientation.Landscape)
+        orientation_index = self.orientation.findData(orientation)
+        self.orientation.setCurrentIndex(orientation_index if orientation_index >= 0 else 1)
 
         form = QFormLayout(self)
         form.addRow("打印机：", self.printer_names)
+        form.addRow("方向：", self.orientation)
         form.addRow("份数：", self.copies)
-        note = QLabel("将以横向打印当前程序单。此窗口由软件直接发送任务，不使用 Windows 不支持预览的系统打印窗口。")
+        note = QLabel("打印前可在软件预览中确认方向。此窗口直接发送 Windows 打印任务，不使用 Windows 不支持预览的系统打印窗口。")
         note.setWordWrap(True)
         form.addRow(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1755,7 +1802,7 @@ class PrinterSelectionDialog(QDialog):
             return None
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setPrinterName(name)
-        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        printer.setPageOrientation(self.orientation.currentData())
         printer.setCopyCount(self.copies.value())
         return printer
 
@@ -1795,6 +1842,14 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         fit_width = QPushButton("适应宽度")
         fit_width.clicked.connect(lambda: self.preview.setZoomMode(QPrintPreviewWidget.ZoomMode.FitToWidth))
         controls.addWidget(fit_width)
+        self.orientation = QComboBox()
+        self.orientation.addItem("▯ 竖向", QPageLayout.Orientation.Portrait)
+        self.orientation.addItem("▭ 横向", QPageLayout.Orientation.Landscape)
+        current_orientation = self._printer.pageLayout().orientation()
+        self.orientation.setCurrentIndex(max(0, self.orientation.findData(current_orientation)))
+        self.orientation.setToolTip("选择纸张方向，预览会立即更新")
+        self.orientation.currentIndexChanged.connect(self._change_orientation)
+        controls.addWidget(self.orientation)
         controls.addStretch(1)
         print_button = QPushButton("打印")
         print_button.setObjectName("primaryButton")
@@ -1814,8 +1869,15 @@ class ProgramSheetPrintPreviewDialog(QDialog):
     def _update_zoom_label(self) -> None:
         self.zoom_label.setText(f"缩放：{round((self.preview.zoomFactor() or 1.0) * 100)}%")
 
+    def _change_orientation(self) -> None:
+        orientation = self.orientation.currentData()
+        if orientation is None:
+            return
+        self._printer.setPageOrientation(orientation)
+        self.preview.updatePreview()
+
     def _print(self) -> None:
-        dialog = PrinterSelectionDialog(self)
+        dialog = PrinterSelectionDialog(self._printer.pageLayout().orientation(), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         printer = dialog.build_printer()
@@ -1924,6 +1986,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(12, 12, 12, 12)
         toolbar = QHBoxLayout()
+        self._optional_toolbar_buttons: dict[str, QPushButton] = {}
         self.save_button = QPushButton("完成并保存")
         self.save_button.setObjectName("primaryButton")
         self.save_button.clicked.connect(self.save_output)
@@ -1953,13 +2016,9 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
-        print_preview = QPushButton("打印预览")
-        print_preview.clicked.connect(self.preview_program_sheet)
-        print_preview.setToolTip("先预览分页与缩放效果，再选择打印机")
-        toolbar.addWidget(print_preview)
-        print_sheet = QPushButton("直接打印")
-        print_sheet.clicked.connect(self.print_program_sheet)
-        print_sheet.setToolTip("打印当前 Excel 程序单预览")
+        print_sheet = QPushButton("打印")
+        print_sheet.clicked.connect(self.preview_program_sheet)
+        print_sheet.setToolTip("先预览纸张方向、分页与缩放效果，再选择打印机")
         toolbar.addWidget(print_sheet)
         m06 = QPushButton("M06")
         m06.clicked.connect(lambda: self.open_conversion_dialog(TransformMode.M06))
@@ -1984,6 +2043,21 @@ class MainWindow(QMainWindow):
         settings_button.clicked.connect(self.edit_settings)
         settings_button.setToolTip("常规、提醒与更新设置")
         toolbar.addWidget(settings_button)
+        self._optional_toolbar_buttons = {
+            "save_location": save_location,
+            "reparse": reparse,
+            "undo": undo,
+            "redo": redo,
+            "find_replace": find_replace,
+            "clear": clear,
+            "template": template,
+            "print": print_sheet,
+            "m06": m06,
+            "m304": m304,
+            "copper": copper,
+            "updates": updates,
+        }
+        self._apply_toolbar_button_visibility()
         layout.addLayout(toolbar)
 
         self.drop_label = QLabel(
@@ -2267,20 +2341,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def print_program_sheet(self) -> None:
-        """Choose a printer in-app, then print without the Windows preview pane."""
+        """Keep older callers working while always offering orientation preview."""
 
-        image = self._capture_sheet_for_printing()
-        if image is None:
-            return
-        dialog = PrinterSelectionDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        printer = dialog.build_printer()
-        if printer is None:
-            self.show_error("未找到打印机", "Windows 当前没有可用打印机，请先安装或连接打印机。")
-            return
-        self._paint_sheet_on_printer(printer, image)
-        self.statusBar().showMessage("已发送到打印机。", 3500)
+        self.preview_program_sheet()
 
     def _clipboard_contains_nc_input(self) -> bool:
         mime_data = QApplication.clipboard().mimeData()
@@ -2972,6 +3035,14 @@ class MainWindow(QMainWindow):
     def _repository(self) -> str:
         return str(self.settings.get("update_repository") or load_embedded_update_repository()).strip()
 
+    def _apply_toolbar_button_visibility(self) -> None:
+        """Apply the user's compact-toolbar choices without losing actions."""
+
+        saved = self.settings.get("toolbar_button_visibility", {})
+        visibility = saved if isinstance(saved, dict) else {}
+        for key, button in self._optional_toolbar_buttons.items():
+            button.setVisible(bool(visibility.get(key, True)))
+
     def edit_settings(self) -> None:
         """Edit ordinary user preferences from the single Settings button."""
 
@@ -2982,6 +3053,7 @@ class MainWindow(QMainWindow):
             bool(self.settings.get("confirm_before_clear", True)),
             bool(self.settings.get("confirm_before_save", False)),
             bool(self.settings.get("open_folder_after_save", False)),
+            self.settings.get("toolbar_button_visibility", {}) if isinstance(self.settings.get("toolbar_button_visibility", {}), dict) else {},
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2992,11 +3064,15 @@ class MainWindow(QMainWindow):
             self.settings["confirm_before_clear"] = dialog.confirm_before_clear.isChecked()
             self.settings["confirm_before_save"] = dialog.confirm_before_save.isChecked()
             self.settings["open_folder_after_save"] = dialog.open_folder_after_save.isChecked()
+            self.settings["toolbar_button_visibility"] = {
+                key: checkbox.isChecked() for key, checkbox in dialog.toolbar_buttons.items()
+            }
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
+            self._apply_toolbar_button_visibility()
             self.statusBar().showMessage("设置已保存。", 3500)
 
     def open_find_replace(self, replace_mode: bool = True) -> None:
