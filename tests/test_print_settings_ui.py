@@ -26,8 +26,10 @@ def test_print_orientation_and_toolbar_visibility_preferences_are_available() ->
         {"print": False},
         "portrait",
         8,
+        "#C6EFCE",
     )
     assert not settings.toolbar_buttons["print"].isChecked()
+    assert settings.selected_selection_color() == "#c6efce"
 
     preview = ProgramSheetPrintPreviewDialog(QPrinter(), lambda printer: None, "A1:K25", 8)
     preview.orientation.setCurrentIndex(0)

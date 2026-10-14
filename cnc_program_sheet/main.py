@@ -12,13 +12,14 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QItemSelectionModel, QPoint, QRectF, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRectF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QColorDialog,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -95,6 +96,7 @@ FIELD_NAMES = {field for _, field in RESULT_COLUMNS if field != "status"}
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 ROTATION_MARKERS = ("❮Y⟲180°❯", "❮X⟲180°❯", "❮Z⟲180°❯")
 MARKER_RED = QColor("#FF0000")
+DEFAULT_SELECTION_COLOR = "#B7D7FF"
 CONVERSION_TAG_BACKGROUND = QColor("#DDEBF7")
 CONVERSION_TAG_FOREGROUND = QColor("#1F4E78")
 CONVERSION_TAGS = {
@@ -850,11 +852,7 @@ class ExcelPreview(QTableWidget):
         # Some Windows palettes use white text for a selected table item.
         # That makes the contents appear to disappear on a light template, so
         # give the selection an explicit Excel-like blue fill and dark text.
-        self.setStyleSheet(
-            "QTableWidget::item:selected { background-color: #B7D7FF; color: #000000; }"
-            "QTableWidget::item:selected:active { background-color: #8EC5FF; color: #000000; }"
-            "QTableWidget::item:focus { border: 2px solid #2176D2; }"
-        )
+        self.set_selection_color(DEFAULT_SELECTION_COLOR)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_program_row_menu)
         self.itemChanged.connect(self._on_item_changed)
@@ -954,15 +952,32 @@ class ExcelPreview(QTableWidget):
         item = self.item(index.row(), index.column())
         return item is None or not item.text().strip()
 
-    def _dismiss_range_selection(self, index: Any) -> None:
-        """Clear a visible range while retaining a keyboard/paste anchor cell."""
+    def set_selection_color(self, color_name: str) -> str:
+        """Apply the user's preferred selection fill and matching outline."""
+
+        color = QColor(color_name)
+        if not color.isValid():
+            color = QColor(DEFAULT_SELECTION_COLOR)
+        fill = color.name()
+        active_fill = color.darker(108).name()
+        outline = color.darker(175).name()
+        self.setStyleSheet(
+            f"QTableWidget::item:selected {{ background-color: {fill}; color: #000000; }}"
+            f"QTableWidget::item:selected:active {{ background-color: {active_fill}; color: #000000; }}"
+            f"QTableWidget::item:focus {{ border: 2px solid {outline}; }}"
+        )
+        return fill
+
+    def _dismiss_range_selection(self) -> None:
+        """Return the sheet to a fully normal state without an active cell."""
 
         self.clearSelection()
-        if index.isValid():
-            # NoUpdate preserves the intentionally empty selection; using
-            # setCurrentCell() here would immediately select one cell again.
-            self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        # clearSelection() removes the blue fill but intentionally keeps the
+        # active cell.  That cell still draws Qt's blue focus rectangle, which
+        # is not a complete cancellation from the operator's point of view.
+        self.selectionModel().clearCurrentIndex()
         self.clear_image_selection()
+        self.viewport().update()
 
     def mousePressEvent(self, event: Any) -> None:
         """Remember whether a multi-cell range existed before a table click."""
@@ -986,7 +1001,7 @@ class ExcelPreview(QTableWidget):
             and self._is_plain_click(event, self._pointer_press_position)
             and self._is_empty_grid_cell(index)
         ):
-            self._dismiss_range_selection(index)
+            self._dismiss_range_selection()
             self._range_selection_before_click = False
             return
         self._range_selection_before_click = False
@@ -1275,9 +1290,9 @@ class ExcelPreview(QTableWidget):
     def keyPressEvent(self, event: Any) -> None:
         if event.key() == Qt.Key.Key_Escape and len(self.selectedIndexes()) > 1:
             # Match the standard spreadsheet escape route as well as the
-            # mouse route above.  A single active cell remains available for
-            # keyboard editing, so Esc does not interfere with ordinary edits.
-            self._dismiss_range_selection(self.currentIndex())
+            # mouse route above.  It deliberately removes the remaining
+            # active-cell outline too, returning the sheet to a normal state.
+            self._dismiss_range_selection()
             event.accept()
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
@@ -1675,11 +1690,12 @@ class SettingsDialog(QDialog):
         toolbar_visibility: dict[str, bool],
         print_orientation: str,
         print_margin_mm: int,
+        selection_color: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(520, 355)
+        self.resize(540, 375)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
@@ -1711,7 +1727,30 @@ class SettingsDialog(QDialog):
         editing_layout = QVBoxLayout(editing)
         editing_layout.addWidget(self.confirm_before_clear)
         editing_layout.addWidget(self.confirm_before_save)
-        editing_note = QLabel("表格支持 Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+F 查找、Ctrl+H 替换；也可在表格中右键打开查找/替换。")
+        self.selection_color = QLineEdit(self._normalized_selection_color(selection_color))
+        self.selection_color.setMaxLength(7)
+        self.selection_color.setPlaceholderText("#B7D7FF")
+        self.selection_color.setToolTip("输入 #RRGGBB，或点击“选择颜色”使用调色板")
+        self.selection_color.textChanged.connect(self._refresh_selection_color_sample)
+        self.selection_color_sample = QLabel("框选示例")
+        self.selection_color_sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.selection_color_sample.setMinimumWidth(75)
+        choose_color = QPushButton("选择颜色…")
+        choose_color.clicked.connect(self._choose_selection_color)
+        restore_color = QPushButton("默认")
+        restore_color.clicked.connect(lambda: self.selection_color.setText(DEFAULT_SELECTION_COLOR))
+        color_row = QHBoxLayout()
+        color_row.addWidget(self.selection_color, 1)
+        color_row.addWidget(self.selection_color_sample)
+        color_row.addWidget(choose_color)
+        color_row.addWidget(restore_color)
+        editing_layout.addWidget(QLabel("框选颜色："))
+        editing_layout.addLayout(color_row)
+        self._refresh_selection_color_sample()
+        editing_note = QLabel(
+            "表格支持 Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+F 查找、Ctrl+H 替换；"
+            "框选后单击空白处或按 Esc 可完全取消框选。"
+        )
         editing_note.setWordWrap(True)
         editing_layout.addWidget(editing_note)
         editing_layout.addStretch(1)
@@ -1776,6 +1815,27 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    @staticmethod
+    def _normalized_selection_color(color_name: str) -> str:
+        color = QColor(color_name)
+        return color.name() if color.isValid() else DEFAULT_SELECTION_COLOR
+
+    def selected_selection_color(self) -> str:
+        """Return a safe persisted value even if the typed text is invalid."""
+
+        return self._normalized_selection_color(self.selection_color.text().strip())
+
+    def _refresh_selection_color_sample(self) -> None:
+        color = self.selected_selection_color()
+        self.selection_color_sample.setStyleSheet(
+            f"background-color: {color}; color: #000000; border: 1px solid {QColor(color).darker(175).name()};"
+        )
+
+    def _choose_selection_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self.selected_selection_color()), self, "选择框选颜色")
+        if color.isValid():
+            self.selection_color.setText(color.name())
 
 
 class FindReplaceDialog(QDialog):
@@ -2289,6 +2349,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.template_label)
         self.preview = ExcelPreview()
         self.preview.setObjectName("excelPreview")
+        self.preview.set_selection_color(str(self.settings.get("selection_color", DEFAULT_SELECTION_COLOR)))
         self.preview.cell_edited.connect(self._on_preview_edited)
         self.preview.insert_blank_row_requested.connect(self.insert_blank_program_row)
         self.preview.insert_marker_row_requested.connect(self.insert_marker_program_row)
@@ -3514,6 +3575,7 @@ class MainWindow(QMainWindow):
             self.settings.get("toolbar_button_visibility", {}) if isinstance(self.settings.get("toolbar_button_visibility", {}), dict) else {},
             str(self.settings.get("print_orientation", "portrait")),
             self._configured_print_margin_mm(),
+            str(self.settings.get("selection_color", DEFAULT_SELECTION_COLOR)),
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -3529,12 +3591,14 @@ class MainWindow(QMainWindow):
             }
             self.settings["print_orientation"] = str(dialog.print_orientation.currentData())
             self.settings["print_margin_mm"] = dialog.print_margin_mm.value()
+            self.settings["selection_color"] = dialog.selected_selection_color()
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
             self._apply_toolbar_button_visibility()
+            self.preview.set_selection_color(self.settings["selection_color"])
             self.statusBar().showMessage("设置已保存。", 3500)
 
     def open_find_replace(self, replace_mode: bool = True) -> None:

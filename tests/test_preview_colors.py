@@ -77,7 +77,7 @@ def test_preview_single_value_fills_the_selected_rectangle_like_excel() -> None:
 
 
 def test_preview_blank_cell_click_dismisses_a_multi_cell_selection() -> None:
-    """A blank-grid click cancels a range without losing its paste anchor."""
+    """A blank-grid click restores the sheet without a residual focus box."""
 
     app = QApplication.instance() or QApplication([])
     preview = ExcelPreview()
@@ -95,7 +95,7 @@ def test_preview_blank_cell_click_dismisses_a_multi_cell_selection() -> None:
     QTest.mouseClick(preview.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, preview.visualRect(target).center())
 
     assert preview.selectedIndexes() == []
-    assert (preview.currentRow(), preview.currentColumn()) == (14, 1)
+    assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
     preview.close()
     assert app is not None
 
@@ -110,7 +110,18 @@ def test_preview_escape_dismisses_a_multi_cell_selection() -> None:
     QTest.keyClick(preview, Qt.Key.Key_Escape)
 
     assert preview.selectedIndexes() == []
-    assert (preview.currentRow(), preview.currentColumn()) == (6, 1)
+    assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
+    preview.close()
+    assert app is not None
+
+
+def test_preview_selection_color_can_be_changed() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+
+    assert preview.set_selection_color("#C6EFCE") == "#c6efce"
+    assert "#c6efce" in preview.styleSheet()
+    assert preview.set_selection_color("invalid") == "#b7d7ff"
     preview.close()
     assert app is not None
 
