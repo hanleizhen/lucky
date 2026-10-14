@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -42,8 +43,9 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QSpinBox,
 )
-from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewWidget
+from PySide6.QtPrintSupport import QPrinter, QPrinterInfo, QPrintPreviewWidget
 
 from .app_paths import (
     cache_pasted_nc_program,
@@ -1716,6 +1718,48 @@ class WheelZoomPrintPreview(QPrintPreviewWidget):
         event.accept()
 
 
+class PrinterSelectionDialog(QDialog):
+    """Choose a Windows printer without opening the unsupported OS preview."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("选择打印机")
+        self.setMinimumWidth(380)
+        self.printer_names = QComboBox()
+        available = QPrinterInfo.availablePrinterNames()
+        default_name = QPrinterInfo.defaultPrinter().printerName()
+        self.printer_names.addItems(available)
+        if default_name:
+            index = self.printer_names.findText(default_name)
+            if index >= 0:
+                self.printer_names.setCurrentIndex(index)
+        self.copies = QSpinBox()
+        self.copies.setRange(1, 99)
+        self.copies.setValue(1)
+
+        form = QFormLayout(self)
+        form.addRow("打印机：", self.printer_names)
+        form.addRow("份数：", self.copies)
+        note = QLabel("将以横向打印当前程序单。此窗口由软件直接发送任务，不使用 Windows 不支持预览的系统打印窗口。")
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("打印")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def build_printer(self) -> QPrinter | None:
+        name = self.printer_names.currentText().strip()
+        if not name:
+            return None
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPrinterName(name)
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        printer.setCopyCount(self.copies.value())
+        return printer
+
+
 class ProgramSheetPrintPreviewDialog(QDialog):
     """Printable sheet preview with explicit controls and wheel zoom."""
 
@@ -1771,10 +1815,15 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         self.zoom_label.setText(f"缩放：{round((self.preview.zoomFactor() or 1.0) * 100)}%")
 
     def _print(self) -> None:
-        dialog = QPrintDialog(self._printer, self)
-        dialog.setWindowTitle("打印 CNC 程序单")
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._render_page(self._printer)
+        dialog = PrinterSelectionDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        printer = dialog.build_printer()
+        if printer is None:
+            QMessageBox.warning(self, "未找到打印机", "Windows 当前没有可用打印机，请先安装或连接打印机。")
+            return
+        self._render_page(printer)
+
 
 
 class MainWindow(QMainWindow):
@@ -2218,16 +2267,17 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def print_program_sheet(self) -> None:
-        """Open the standard printer chooser and print the current sheet."""
+        """Choose a printer in-app, then print without the Windows preview pane."""
 
         image = self._capture_sheet_for_printing()
         if image is None:
             return
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("打印 CNC 程序单")
+        dialog = PrinterSelectionDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        printer = dialog.build_printer()
+        if printer is None:
+            self.show_error("未找到打印机", "Windows 当前没有可用打印机，请先安装或连接打印机。")
             return
         self._paint_sheet_on_printer(printer, image)
         self.statusBar().showMessage("已发送到打印机。", 3500)
