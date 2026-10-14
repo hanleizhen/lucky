@@ -4,8 +4,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QMimeData, Qt, QUrl
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import QEvent, QMimeData, QPointF, Qt, QUrl
+from PySide6.QtGui import QDropEvent, QKeyEvent
 from PySide6.QtWidgets import QApplication
 
 from cnc_program_sheet import app_paths
@@ -47,6 +47,8 @@ def test_preview_ctrl_v_requests_nc_file_import(tmp_path) -> None:
 
     assert received == [True]
     assert event.isAccepted()
+    assert preview.request_clipboard_paste()
+    assert received == [True, True]
     QApplication.clipboard().clear()
     preview.close()
     assert app is not None
@@ -67,4 +69,30 @@ def test_main_window_imports_pasted_nc_text(tmp_path, monkeypatch) -> None:
 
     QApplication.clipboard().clear()
     window.close()
+    assert app is not None
+
+
+def test_main_drop_target_imports_nc_file(tmp_path) -> None:
+    """Dropping on the visible import area reaches the same parser as Ctrl+V."""
+
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "O-2.NC"
+    source.write_text("O-2\nT1M6\nG0Z5\nG1Z-1\nM30\n", encoding="utf-8")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source))])
+    window = MainWindow()
+    event = QDropEvent(
+        QPointF(10, 10),
+        Qt.DropAction.CopyAction,
+        mime_data,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    try:
+        assert window.eventFilter(window.drop_label, event)
+        assert len(window.records) == 1
+        assert window.records[0] is not None
+        assert window.records[0].program_name == "O-2.NC"
+    finally:
+        window.close()
     assert app is not None

@@ -252,22 +252,37 @@ class ConversionResult:
 
 
 class NcConversionDropArea(QLabel):
-    """Focusable drag/drop target used by the M06, M304 and copper pages."""
+    """Focusable drag/drop target shared by conversion and main import pages."""
 
     paths_dropped = Signal(object)
     paste_requested = Signal()
 
-    def __init__(self, accepts_path: Callable[[Path], bool], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        accepts_path: Callable[[Path], bool],
+        parent: QWidget | None = None,
+        *,
+        object_name: str = "conversionDropArea",
+        instruction: str | None = None,
+        minimum_height: int = 74,
+    ) -> None:
         super().__init__(parent)
         self._accepts_path = accepts_path
-        self.setObjectName("conversionDropArea")
+        self.setObjectName(object_name)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumHeight(74)
-        self.setText("将 NC 程序拖到这里，或点击此处后按 Ctrl+V 导入\n支持复制的 NC 文件和 NC 程序文本")
+        self.setMinimumHeight(minimum_height)
+        self.setText(instruction or "将 NC 程序拖到这里，或点击此处后按 Ctrl+V 导入\n支持复制的 NC 文件和 NC 程序文本")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_import_menu)
 
     def dragEnterEvent(self, event: Any) -> None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(self._accepts_path(Path(url.toLocalFile())) for url in urls if url.isLocalFile()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event: Any) -> None:
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
         if any(self._accepts_path(Path(url.toLocalFile())) for url in urls if url.isLocalFile()):
             event.acceptProposedAction()
@@ -287,6 +302,12 @@ class NcConversionDropArea(QLabel):
         # instruction reliable.
         self.setFocus()
         super().mousePressEvent(event)
+
+    def _show_import_menu(self, position: Any) -> None:
+        menu = QMenu(self)
+        paste = menu.addAction("粘贴 NC 文件 / 程序（与 Ctrl+V 相同）")
+        paste.triggered.connect(self.paste_requested)
+        menu.exec(self.mapToGlobal(position))
 
     def keyPressEvent(self, event: Any) -> None:
         if event.matches(QKeySequence.StandardKey.Paste):
@@ -865,8 +886,8 @@ class ExcelPreview(QTableWidget):
         find_replace = menu.addAction("查找/替换…")
         find_replace.triggered.connect(lambda: self.find_replace_requested.emit(True))
         menu.addSeparator()
-        paste = menu.addAction("粘贴（先在 Win+V 选择内容）")
-        paste.triggered.connect(self.clipboard_table_paste_requested)
+        paste = menu.addAction("粘贴（与 Ctrl+V 相同；可先在 Win+V 选择内容）")
+        paste.triggered.connect(self.request_clipboard_paste)
         copy_action = menu.addAction("复制")
         copy_action.triggered.connect(self.copy_selected_cells)
         cut_action = menu.addAction("剪切")
@@ -1179,6 +1200,25 @@ class ExcelPreview(QTableWidget):
         self._remember_edit(changes)
         return replaced_cells
 
+    def request_clipboard_paste(self) -> bool:
+        """Dispatch a right-click paste through the exact Ctrl+V policy."""
+
+        mime_data = QApplication.clipboard().mimeData()
+        image_file_in_clipboard = any(
+            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_FILE_SUFFIXES
+            for url in mime_data.urls()
+        )
+        if mime_data.hasImage() or image_file_in_clipboard:
+            self.clipboard_image_paste_requested.emit()
+            return True
+        if clipboard_nc_paths(mime_data) or (mime_data.hasText() and is_nc_program_text(mime_data.text())):
+            self.clipboard_nc_paste_requested.emit()
+            return True
+        if mime_data.hasText():
+            self.clipboard_table_paste_requested.emit()
+            return True
+        return False
+
     def keyPressEvent(self, event: Any) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
             self.find_replace_requested.emit(False)
@@ -1204,24 +1244,9 @@ class ExcelPreview(QTableWidget):
             self.cut_selected_cells()
             event.accept()
             return
-        if event.matches(QKeySequence.StandardKey.Paste):
-            mime_data = QApplication.clipboard().mimeData()
-            image_file_in_clipboard = any(
-                url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in IMAGE_FILE_SUFFIXES
-                for url in mime_data.urls()
-            )
-            if mime_data.hasImage() or image_file_in_clipboard:
-                self.clipboard_image_paste_requested.emit()
-                event.accept()
-                return
-            if clipboard_nc_paths(mime_data) or (mime_data.hasText() and is_nc_program_text(mime_data.text())):
-                self.clipboard_nc_paste_requested.emit()
-                event.accept()
-                return
-            if mime_data.hasText():
-                self.clipboard_table_paste_requested.emit()
-                event.accept()
-                return
+        if event.matches(QKeySequence.StandardKey.Paste) and self.request_clipboard_paste():
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Delete:
             # Preserve the earlier shortcut: Delete on an inserted empty row
             # removes that row. Everywhere else Delete behaves like Excel and
@@ -2163,13 +2188,17 @@ class MainWindow(QMainWindow):
         self._apply_toolbar_button_visibility()
         layout.addLayout(toolbar)
 
-        self.drop_label = QLabel(
-            "将 NC 程序拖到这里，或复制后在窗口按 Ctrl+V 粘贴\n"
-            "支持一次导入多个 .NC / .nc 文件及 NC 程序文本，将按程序名数字从小到大排列"
+        self.drop_label = NcConversionDropArea(
+            is_supported_nc_file,
+            object_name="dropArea",
+            instruction=(
+                "将 NC 程序拖到这里，或复制后在窗口按 Ctrl+V / 右键粘贴导入\n"
+                "支持一次导入多个 .NC / .nc 文件及 NC 程序文本，将按程序名数字从小到大排列"
+            ),
+            minimum_height=95,
         )
-        self.drop_label.setObjectName("dropArea")
-        self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.drop_label.setMinimumHeight(95)
+        self.drop_label.paths_dropped.connect(self.add_nc_files)
+        self.drop_label.paste_requested.connect(self._paste_nc_from_menu)
         layout.addWidget(self.drop_label)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2180,6 +2209,8 @@ class MainWindow(QMainWindow):
         self.file_list = QListWidget()
         self.file_list.setMinimumWidth(265)
         self.file_list.itemDoubleClicked.connect(self.edit_imported_nc_file)
+        self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._show_nc_import_menu)
         left_layout.addWidget(self.file_list, 2)
         left_layout.addWidget(QLabel("解析结果（可直接修改）"))
         self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
@@ -2212,10 +2243,27 @@ class MainWindow(QMainWindow):
         self.preview.print_area_requested.connect(self.set_print_area)
         self.preview.clear_print_area_requested.connect(self.clear_print_area)
         self.preview.print_area_selection_finished.connect(self._finish_print_area_selection)
+        # Every visible work area accepts an NC drop.  Some Qt item views own
+        # their viewport and otherwise swallow the drag before it reaches the
+        # main window, which made drops appear to do nothing after UI changes.
+        self._nc_drop_targets = (
+            root,
+            splitter,
+            left,
+            right,
+            self.drop_label,
+            self.file_list,
+            self.file_list.viewport(),
+            self.result_table,
+            self.result_table.viewport(),
+            self.preview,
+            self.preview.viewport(),
+        )
         # Child widgets normally consume Ctrl+V themselves. Intercept it
         # before an Excel/result cell can interpret copied NC code as plain
         # text, while leaving ordinary text paste untouched for editing.
-        for widget in (self.file_list, self.result_table, self.preview):
+        for widget in self._nc_drop_targets:
+            widget.setAcceptDrops(True)
             widget.installEventFilter(self)
         right_layout.addWidget(self.preview)
         splitter.addWidget(left)
@@ -2656,6 +2704,30 @@ class MainWindow(QMainWindow):
 
         self.preview_program_sheet()
 
+    def _show_nc_import_menu(self, position: Any) -> None:
+        """Provide a mouse alternative to Ctrl+V in the imported-files pane."""
+
+        menu = QMenu(self.file_list)
+        paste = menu.addAction("粘贴 NC 文件 / 程序（与 Ctrl+V 相同）")
+        paste.triggered.connect(self._paste_nc_from_menu)
+        menu.exec(self.file_list.mapToGlobal(position))
+
+    def _paste_nc_from_menu(self) -> None:
+        if not self.paste_nc_from_clipboard():
+            self.statusBar().showMessage("剪贴板中没有可导入的 NC 文件或 NC 程序文本。", 4000)
+
+    @staticmethod
+    def _nc_paths_from_mime_data(mime_data: Any) -> list[Path]:
+        """Return only supported local NC paths from a drag/drop payload."""
+
+        if not mime_data.hasUrls():
+            return []
+        return [
+            Path(url.toLocalFile())
+            for url in mime_data.urls()
+            if url.isLocalFile() and is_supported_nc_file(Path(url.toLocalFile()))
+        ]
+
     def _clipboard_contains_nc_input(self) -> bool:
         mime_data = QApplication.clipboard().mimeData()
         return bool(clipboard_nc_paths(mime_data)) or (mime_data.hasText() and is_nc_program_text(mime_data.text()))
@@ -2687,6 +2759,17 @@ class MainWindow(QMainWindow):
             return True
 
     def eventFilter(self, watched: Any, event: Any) -> bool:
+        if watched in getattr(self, "_nc_drop_targets", ()) and event.type() in {
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.Drop,
+        }:
+            paths = self._nc_paths_from_mime_data(event.mimeData())
+            if paths:
+                if event.type() == QEvent.Type.Drop:
+                    self.add_nc_files(paths)
+                event.acceptProposedAction()
+                return True
         if event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
             if self._clipboard_contains_nc_input():
                 self.paste_nc_from_clipboard()
@@ -2870,14 +2953,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已保存并重新解析：{source_path.name}", 4500)
 
     def dragEnterEvent(self, event: Any) -> None:  # Qt event type differs across bindings
-        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
-        if any(is_supported_nc_file(Path(url.toLocalFile())) for url in urls):
+        if self._nc_paths_from_mime_data(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if self._nc_paths_from_mime_data(event.mimeData()):
             event.acceptProposedAction()
 
     def dropEvent(self, event: Any) -> None:
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()]
-        self.add_nc_files(paths)
-        event.acceptProposedAction()
+        paths = self._nc_paths_from_mime_data(event.mimeData())
+        if paths:
+            self.add_nc_files(paths)
+            event.acceptProposedAction()
 
     @staticmethod
     def _program_row_index(table_row: int) -> int | None:
