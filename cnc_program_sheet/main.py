@@ -115,7 +115,6 @@ OPTIONAL_TOOLBAR_BUTTONS: tuple[tuple[str, str], ...] = (
     ("find_replace", "查找替换"),
     ("clear", "清空"),
     ("template", "打开模板"),
-    ("print_area", "打印区域"),
     ("print", "打印"),
     ("m06", "M06"),
     ("m304", "M304"),
@@ -783,6 +782,7 @@ class ExcelPreview(QTableWidget):
     find_replace_requested = Signal(bool)
     print_area_requested = Signal(int, int, int, int)
     clear_print_area_requested = Signal()
+    print_area_selection_finished = Signal(int, int, int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -909,6 +909,16 @@ class ExcelPreview(QTableWidget):
         """Expose the current Excel-like rectangular selection to the window."""
 
         return self._selection_rectangle()
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        """Commit a pending print-range selection only after a drag finishes."""
+
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        selection = self._selection_rectangle()
+        if selection is not None:
+            self.print_area_selection_finished.emit(*selection)
 
     def _paste_anchor(self) -> tuple[int, int] | None:
         selection = self._selection_rectangle()
@@ -1654,7 +1664,7 @@ class SettingsDialog(QDialog):
         self.print_margin_mm.setValue(max(0, min(30, print_margin_mm)))
         print_form.addRow("默认方向：", self.print_orientation)
         print_form.addRow("页面边距：", self.print_margin_mm)
-        print_note = QLabel("打印区域、方向与边距会自动记住。可先在主表格拖动框选，再点击“打印区域”或右键设为打印区域。")
+        print_note = QLabel("打印区域、方向与边距会自动记住。可在打印预览底部点击“打印区域”回到主表格框选，也可右键设为打印区域。")
         print_note.setWordWrap(True)
         print_form.addRow(print_note)
         tabs.addTab(printing, "打印")
@@ -1862,6 +1872,8 @@ class PrinterSelectionDialog(QDialog):
 class ProgramSheetPrintPreviewDialog(QDialog):
     """Printable sheet preview with explicit controls and wheel zoom."""
 
+    select_print_area_requested = Signal()
+
     def __init__(
         self,
         printer: QPrinter,
@@ -1919,6 +1931,10 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         self.margin.setToolTip("调整打印区域距离纸张边缘的距离")
         self.margin.valueChanged.connect(self._change_margin)
         controls.addWidget(self.margin)
+        print_area = QPushButton("打印区域")
+        print_area.setToolTip("返回主表格框选区域；松开鼠标后会自动记住")
+        print_area.clicked.connect(self._select_print_area)
+        controls.addWidget(print_area)
         controls.addStretch(1)
         print_button = QPushButton("打印")
         print_button.setObjectName("primaryButton")
@@ -1953,6 +1969,12 @@ class ProgramSheetPrintPreviewDialog(QDialog):
     def _save_preferences(self) -> None:
         if self._preferences_changed is not None:
             self._preferences_changed(self._printer.pageLayout().orientation(), self.margin.value())
+
+    def _select_print_area(self) -> None:
+        """Close the preview and hand focus back to the sheet for range picking."""
+
+        self.reject()
+        self.select_print_area_requested.emit()
 
     def _print(self) -> None:
         dialog = PrinterSelectionDialog(self._printer.pageLayout().orientation(), self)
@@ -1995,6 +2017,7 @@ class MainWindow(QMainWindow):
         self._result_loading = False
         self._update_worker: Worker | None = None
         self._print_printer: QPrinter | None = None
+        self._awaiting_print_area_selection = False
         # An update installer must be allowed to close the running process
         # without the ordinary user-facing close/minimize question.
         self._exiting_for_update = False
@@ -2096,10 +2119,6 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
-        print_area = QPushButton("打印区域")
-        print_area.clicked.connect(self.set_print_area_from_selection)
-        print_area.setToolTip("先框选右侧表格，再点击此按钮，记住要打印的区域")
-        toolbar.addWidget(print_area)
         print_sheet = QPushButton("打印")
         print_sheet.clicked.connect(self.preview_program_sheet)
         print_sheet.setToolTip("先预览纸张方向、分页与缩放效果，再选择打印机")
@@ -2135,7 +2154,6 @@ class MainWindow(QMainWindow):
             "find_replace": find_replace,
             "clear": clear,
             "template": template,
-            "print_area": print_area,
             "print": print_sheet,
             "m06": m06,
             "m304": m304,
@@ -2193,6 +2211,7 @@ class MainWindow(QMainWindow):
         self.preview.find_replace_requested.connect(self.open_find_replace)
         self.preview.print_area_requested.connect(self.set_print_area)
         self.preview.clear_print_area_requested.connect(self.clear_print_area)
+        self.preview.print_area_selection_finished.connect(self._finish_print_area_selection)
         # Child widgets normally consume Ctrl+V themselves. Intercept it
         # before an Excel/result cell can interpret copied NC code as plain
         # text, while leaving ordinary text paste untouched for editing.
@@ -2405,6 +2424,27 @@ class MainWindow(QMainWindow):
             return
         self.set_print_area(*area)
 
+    def begin_print_area_selection(self) -> None:
+        """Return from print preview and let the user drag a remembered range."""
+
+        self._awaiting_print_area_selection = True
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.preview.clearSelection()
+        self.preview.clear_image_selection()
+        self.preview.setFocus()
+        self.statusBar().showMessage(
+            "请在右侧表格拖动框选打印区域；松开鼠标后会自动记住，再点击“打印”预览。",
+            9000,
+        )
+
+    def _finish_print_area_selection(self, top: int, left: int, bottom: int, right: int) -> None:
+        if not self._awaiting_print_area_selection:
+            return
+        self._awaiting_print_area_selection = False
+        self.set_print_area(top, left, bottom, right)
+
     def set_print_area(self, top: int, left: int, bottom: int, right: int) -> None:
         """Persist a rectangular Excel range for this template's future prints."""
 
@@ -2521,8 +2561,18 @@ class MainWindow(QMainWindow):
             # stable printed border like Excel/WPS around the chosen region.
             border_painter = QPainter(cropped)
             try:
-                border_painter.setPen(QPen(QColor("#000000"), max(2, render_scale)))
-                border_painter.drawRect(0, 0, cropped.width() - 1, cropped.height() - 1)
+                # Keep the whole stroke inside the image. Drawing a pen on
+                # the zero edge cuts half of it off, which is especially
+                # visible on a physical printer's left edge.
+                border_width = max(4, render_scale + 1)
+                inset = (border_width + 1) // 2
+                border_painter.setPen(QPen(QColor("#000000"), border_width))
+                border_painter.drawRect(
+                    inset,
+                    inset,
+                    max(1, cropped.width() - inset * 2 - 1),
+                    max(1, cropped.height() - inset * 2 - 1),
+                )
             finally:
                 border_painter.end()
             return cropped
@@ -2557,9 +2607,13 @@ class MainWindow(QMainWindow):
             # apparent size on PDF versus a physical Windows printer.
             page = printer.pageRect(QPrinter.Unit.DevicePixel)
             margin_pixels = max(0, min(30, margin_mm)) * printer.resolution() / 25.4
+            # With the default ``fullPage=False``, Qt's painter origin is
+            # already the top-left of ``pageRect``. Adding ``page.x/y`` here
+            # applies a printer-driver margin a second time, visibly pushing
+            # the sheet sideways and clipping its outside border.
             printable = QRectF(
-                page.x() + margin_pixels,
-                page.y() + margin_pixels,
+                margin_pixels,
+                margin_pixels,
                 max(1.0, page.width() - margin_pixels * 2),
                 max(1.0, page.height() - margin_pixels * 2),
             )
@@ -2594,6 +2648,7 @@ class MainWindow(QMainWindow):
             self._save_print_preferences,
             self,
         )
+        dialog.select_print_area_requested.connect(self.begin_print_area_selection)
         dialog.exec()
 
     def print_program_sheet(self) -> None:

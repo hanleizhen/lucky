@@ -32,6 +32,10 @@ def test_print_orientation_and_toolbar_visibility_preferences_are_available() ->
     preview = ProgramSheetPrintPreviewDialog(QPrinter(), lambda printer: None, "A1:K25", 8)
     preview.orientation.setCurrentIndex(0)
     assert preview._printer.pageLayout().orientation() == QPageLayout.Orientation.Portrait
+    selection_requested: list[bool] = []
+    preview.select_print_area_requested.connect(lambda: selection_requested.append(True))
+    preview._select_print_area()
+    assert selection_requested == [True]
     preview.close()
     settings.close()
     printer_dialog.close()
@@ -52,7 +56,8 @@ def test_print_area_and_layout_preferences_are_persisted_per_template(monkeypatc
     )
     window = main_module.MainWindow()
     try:
-        window.set_print_area(6, 0, 10, 4)
+        window.begin_print_area_selection()
+        window._finish_print_area_selection(6, 0, 10, 4)
         assert window._saved_print_area() == (6, 0, 10, 4)
         assert window._print_area_label(window._saved_print_area()) == "A7:E11"
 
