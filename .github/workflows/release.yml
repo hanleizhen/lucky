@@ -36,6 +36,16 @@ jobs:
           $pythonDir = Split-Path (Get-Command python).Source
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$pythonDir"
           python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work cnc_program_sheet.spec
+      - name: Verify packaged application self-check
+        shell: pwsh
+        run: |
+          $marker = Join-Path $env:RUNNER_TEMP "cnc-program-sheet-self-check.txt"
+          $env:CNC_PROGRAM_SHEET_SELF_CHECK_MARKER = $marker
+          & "build/dist/CNCProgramSheet/CNCProgramSheet.exe" --self-check
+          if ($LASTEXITCODE -ne 0) { throw "Packaged application self-check failed with exit code $LASTEXITCODE." }
+          if (!(Test-Path -LiteralPath $marker) -or (Get-Content -Raw -LiteralPath $marker) -notmatch "ok") {
+            throw "Packaged application did not complete its resource self-check."
+          }
       - name: Build setup installer
         shell: pwsh
         run: |

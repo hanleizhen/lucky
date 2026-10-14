@@ -124,6 +124,199 @@ OPTIONAL_TOOLBAR_BUTTONS: tuple[tuple[str, str], ...] = (
     ("updates", "检查更新"),
 )
 
+# Keep the visual system in one place. This is intentionally presentation
+# only: parsing, conversion, workbook generation and keyboard dispatch must
+# not depend on a style rule. Applying it to QApplication (rather than only
+# MainWindow) also makes modal settings, conversion and print dialogs feel
+# like parts of the same product.
+APPLICATION_STYLE_SHEET = """
+QWidget {
+    color: #1F2937;
+    font-family: "Microsoft YaHei UI", "Segoe UI", Arial;
+    font-size: 12px;
+}
+QMainWindow, QDialog, QMessageBox {
+    background: #F6F8FB;
+}
+QLabel {
+    color: #243B53;
+}
+QPushButton {
+    min-height: 28px;
+    padding: 3px 12px;
+    color: #1F2937;
+    background: #FFFFFF;
+    border: 1px solid #C9D4E2;
+    border-radius: 5px;
+}
+QPushButton:hover {
+    background: #F0F6FF;
+    border-color: #76A9E0;
+}
+QPushButton:pressed {
+    background: #DCEBFA;
+    border-color: #4D8DCC;
+}
+QPushButton:disabled {
+    color: #94A3B8;
+    background: #F1F5F9;
+    border-color: #DCE3EB;
+}
+QPushButton#primaryButton {
+    color: #FFFFFF;
+    font-weight: 600;
+    background: #0F6CBD;
+    border-color: #0F6CBD;
+}
+QPushButton#primaryButton:hover {
+    background: #0B5EA8;
+    border-color: #0B5EA8;
+}
+QPushButton#primaryButton:pressed {
+    background: #084B87;
+    border-color: #084B87;
+}
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
+    min-height: 26px;
+    color: #1F2937;
+    background: #FFFFFF;
+    border: 1px solid #BFCBDA;
+    border-radius: 5px;
+    padding: 3px 7px;
+    selection-background-color: #B7D7FF;
+    selection-color: #111827;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border: 1px solid #2684D9;
+}
+QPlainTextEdit {
+    padding: 6px;
+}
+QComboBox::drop-down {
+    width: 23px;
+    border: 0;
+}
+QComboBox QAbstractItemView {
+    color: #1F2937;
+    background: #FFFFFF;
+    border: 1px solid #BFCBDA;
+    selection-background-color: #DCEBFA;
+    selection-color: #1F2937;
+}
+QTableWidget, QListWidget {
+    color: #1F2937;
+    background: #FFFFFF;
+    border: 1px solid #D4DCE7;
+    alternate-background-color: #F8FAFC;
+    gridline-color: #D4DCE7;
+}
+QTableWidget::item:selected, QListWidget::item:selected {
+    color: #111827;
+    background: #DCEBFA;
+}
+QHeaderView::section {
+    min-height: 26px;
+    padding: 3px 6px;
+    color: #334155;
+    font-weight: 600;
+    background: #F1F5F9;
+    border: 0;
+    border-right: 1px solid #D4DCE7;
+    border-bottom: 1px solid #C7D2DE;
+}
+QTabWidget::pane {
+    background: #FFFFFF;
+    border: 1px solid #D4DCE7;
+    border-radius: 5px;
+    top: -1px;
+}
+QTabBar::tab {
+    min-height: 27px;
+    padding: 4px 14px;
+    color: #52657A;
+    background: #EAF0F6;
+    border: 1px solid #D4DCE7;
+    border-bottom: 0;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+}
+QTabBar::tab:selected {
+    color: #0F5FA8;
+    font-weight: 600;
+    background: #FFFFFF;
+}
+QMenu {
+    padding: 5px;
+    color: #1F2937;
+    background: #FFFFFF;
+    border: 1px solid #BFCBDA;
+    border-radius: 5px;
+}
+QMenu::item {
+    min-height: 25px;
+    padding: 4px 28px 4px 24px;
+    border-radius: 3px;
+}
+QMenu::item:selected {
+    color: #0B4F8A;
+    background: #E5F1FC;
+}
+QMenu::item:disabled {
+    color: #94A3B8;
+}
+QMenu::separator {
+    height: 1px;
+    margin: 5px 8px;
+    background: #E2E8F0;
+}
+QToolTip {
+    padding: 5px 7px;
+    color: #FFFFFF;
+    background: #243B53;
+    border: 1px solid #334E68;
+    border-radius: 3px;
+}
+QStatusBar {
+    color: #52657A;
+    background: #F8FAFC;
+    border-top: 1px solid #DCE3EB;
+}
+#dropArea {
+    border: 2px dashed #4B87B9;
+    border-radius: 9px;
+    background: #EDF6FD;
+    color: #245B85;
+    font-size: 15px;
+}
+#conversionDropArea {
+    border: 2px dashed #79A9CF;
+    border-radius: 8px;
+    background: #EDF6FD;
+    color: #245B85;
+    font-size: 13px;
+}
+QTableWidget#excelPreview {
+    gridline-color: #000000;
+    border: 1px solid #000000;
+}
+QTableWidget#excelPreview::item {
+    border-right: 1px solid #000000;
+    border-bottom: 1px solid #000000;
+}
+QTableWidget#excelPreview QHeaderView::section {
+    color: #1F2937;
+    font-weight: 400;
+    background: #FFFFFF;
+    border: 1px solid #000000;
+}
+"""
+
+
+def apply_application_theme(application: QApplication) -> None:
+    """Install the shared, non-functional desktop visual system."""
+
+    application.setStyleSheet(APPLICATION_STYLE_SHEET)
+
 
 def natural_program_sort_key(name: str) -> tuple[object, ...]:
     """Sort program names as an operator expects: O-2 before O-10."""
@@ -2138,6 +2331,12 @@ class ProgramSheetPrintPreviewDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        application = QApplication.instance()
+        if application is not None:
+            # Tests and small support launchers sometimes construct the
+            # window directly instead of calling run(); keep their visual
+            # baseline identical to the normal desktop entry point.
+            apply_application_theme(application)
         self.settings = load_settings()
         # ``None`` is an intentional visual spacer inserted by the operator.
         # Keeping it in the row list means programs below the spacer retain
@@ -2393,17 +2592,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
-        self.setStyleSheet(
-            "QWidget { font-family: 'Microsoft YaHei UI', Arial; font-size: 12px; }"
-            "#dropArea { border: 2px dashed #4b87b9; border-radius: 8px; background: #edf6fd; color: #245b85; font-size: 15px; }"
-            "#conversionDropArea { border: 2px dashed #79a9cf; border-radius: 7px; background: #edf6fd; color: #245b85; font-size: 13px; }"
-            "#primaryButton { background: #0f6cbd; color: white; font-weight: 600; padding: 6px 15px; border-radius: 4px; }"
-            "#primaryButton:hover { background: #005a9e; }"
-            "QTableWidget { gridline-color: #d4dbe2; }"
-            "QTableWidget#excelPreview { gridline-color: #000000; border: 1px solid #000000; }"
-            "QTableWidget#excelPreview::item { border-right: 1px solid #000000; border-bottom: 1px solid #000000; }"
-            "QTableWidget#excelPreview QHeaderView::section { border: 1px solid #000000; }"
-        )
 
     def _load_initial_template(self) -> None:
         candidate = Path(str(self.settings.get("template_path", "")))
@@ -3857,6 +4045,7 @@ class MainWindow(QMainWindow):
 def run() -> int:
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
+    apply_application_theme(app)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("CNCProgramSheet")
     icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))

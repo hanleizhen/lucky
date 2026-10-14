@@ -57,6 +57,10 @@ def test_imported_nc_files_fill_template_in_natural_name_order(tmp_path: Path, m
         "O-10.NC",
     ]
     assert window.preview.objectName() == "excelPreview"
-    assert "QTableWidget#excelPreview { gridline-color: #000000" in window.styleSheet()
+    # The preview's print-like black grid is now supplied by the shared
+    # application theme so conversion/settings dialogs use the same visual
+    # system; it must remain present after importing sorted programs.
+    assert "QTableWidget#excelPreview {" in app.styleSheet()
+    assert "gridline-color: #000000" in app.styleSheet()
     window.close()
     assert app is not None
