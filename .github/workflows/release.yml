@@ -41,8 +41,12 @@ jobs:
         run: |
           $marker = Join-Path $env:RUNNER_TEMP "cnc-program-sheet-self-check.txt"
           $env:CNC_PROGRAM_SHEET_SELF_CHECK_MARKER = $marker
-          & "build/dist/CNCProgramSheet/CNCProgramSheet.exe" --self-check
-          if ($LASTEXITCODE -ne 0) { throw "Packaged application self-check failed with exit code $LASTEXITCODE." }
+          # The application is a windowed EXE. PowerShell's call operator
+          # does not wait for windowed processes, so capture its real exit
+          # code through Start-Process instead of reading $LASTEXITCODE.
+          $application = (Resolve-Path "build/dist/CNCProgramSheet/CNCProgramSheet.exe").Path
+          $process = Start-Process -FilePath $application -ArgumentList "--self-check" -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Packaged application self-check failed with exit code $($process.ExitCode)." }
           if (!(Test-Path -LiteralPath $marker) -or (Get-Content -Raw -LiteralPath $marker) -notmatch "ok") {
             throw "Packaged application did not complete its resource self-check."
           }
