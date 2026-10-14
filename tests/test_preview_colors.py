@@ -115,6 +115,39 @@ def test_preview_escape_dismisses_a_multi_cell_selection() -> None:
     assert app is not None
 
 
+def test_preview_blank_cell_click_dismisses_a_single_cell_focus() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.resize(900, 700)
+    preview.show()
+    app.processEvents()
+    preview.setCurrentCell(6, 1)
+    assert (preview.currentRow(), preview.currentColumn()) == (6, 1)
+
+    target = preview.model().index(14, 1)
+    QTest.mouseClick(preview.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, preview.visualRect(target).center())
+
+    assert preview.selectedIndexes() == []
+    assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
+    preview.close()
+    assert app is not None
+
+
+def test_preview_escape_dismisses_a_single_cell_focus() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.setCurrentCell(6, 1)
+
+    QTest.keyClick(preview, Qt.Key.Key_Escape)
+
+    assert preview.selectedIndexes() == []
+    assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
+    preview.close()
+    assert app is not None
+
+
 def test_preview_selection_color_can_be_changed() -> None:
     app = QApplication.instance() or QApplication([])
     preview = ExcelPreview()

@@ -821,9 +821,9 @@ class ExcelPreview(QTableWidget):
         self._known_values: dict[str, str] = {}
         self._history_applying = False
         # Keep enough pointer state to distinguish a normal click from a
-        # drag-selection.  A click on an empty grid cell after a range has
-        # been selected is the familiar Excel way to dismiss that range.
-        self._range_selection_before_click = False
+        # drag-selection.  A click on an empty grid cell after either one cell
+        # or a range has been selected dismisses the visible focus completely.
+        self._active_cell_before_click = False
         self._pointer_press_position = QPoint()
         # QTableWidget only contains an item at the top-left of an Excel
         # merged range.  Keep the mapping for every covered preview cell so
@@ -980,13 +980,13 @@ class ExcelPreview(QTableWidget):
         self.viewport().update()
 
     def mousePressEvent(self, event: Any) -> None:
-        """Remember whether a multi-cell range existed before a table click."""
+        """Remember whether any cell focus existed before a table click."""
 
         if event.button() == Qt.MouseButton.LeftButton:
-            self._range_selection_before_click = len(self.selectedIndexes()) > 1
+            self._active_cell_before_click = self.currentIndex().isValid()
             self._pointer_press_position = event.position().toPoint()
         else:
-            self._range_selection_before_click = False
+            self._active_cell_before_click = False
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: Any) -> None:
@@ -997,14 +997,14 @@ class ExcelPreview(QTableWidget):
             return
         index = self.indexAt(event.position().toPoint())
         if (
-            self._range_selection_before_click
+            self._active_cell_before_click
             and self._is_plain_click(event, self._pointer_press_position)
             and self._is_empty_grid_cell(index)
         ):
             self._dismiss_range_selection()
-            self._range_selection_before_click = False
+            self._active_cell_before_click = False
             return
-        self._range_selection_before_click = False
+        self._active_cell_before_click = False
         selection = self._selection_rectangle()
         if selection is not None:
             self.print_area_selection_finished.emit(*selection)
@@ -1288,7 +1288,7 @@ class ExcelPreview(QTableWidget):
         return False
 
     def keyPressEvent(self, event: Any) -> None:
-        if event.key() == Qt.Key.Key_Escape and len(self.selectedIndexes()) > 1:
+        if event.key() == Qt.Key.Key_Escape and self.currentIndex().isValid():
             # Match the standard spreadsheet escape route as well as the
             # mouse route above.  It deliberately removes the remaining
             # active-cell outline too, returning the sheet to a normal state.
