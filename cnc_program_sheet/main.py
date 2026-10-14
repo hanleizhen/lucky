@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRectF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1519,6 +1519,13 @@ class ExcelPreview(QTableWidget):
         if placement_id in self._image_overlays:
             self._select_image(placement_id)
 
+    def clear_image_selection(self) -> None:
+        """Remove editing handles temporarily, for example while printing."""
+
+        self._selected_image_id = None
+        for overlay in self._image_overlays.values():
+            overlay.set_selected(False)
+
     def _commit_overlay_geometry(self, placement_id: str, x: int, y: int, width: int, height: int) -> None:
         anchor, offset_x, offset_y = self._anchor_for_sheet_position(x, y)
         self.image_geometry_changed.emit(placement_id, anchor, offset_x, offset_y, width, height)
@@ -2287,41 +2294,103 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("没有可重做的表格编辑。", 2500)
 
-    def _capture_sheet_for_printing(self) -> QPixmap | None:
-        """Capture the whole fixed template, including off-screen cells."""
+    def _capture_sheet_for_printing(self) -> QImage | None:
+        """Render a clean, high-resolution sheet image for dependable printing.
+
+        Qt's PDF/vector painter can replace Chinese glyphs with empty squares
+        on some Windows systems. We therefore render the sheet viewport at four
+        times its screen size: text, lines, and pasted pictures remain crisp,
+        Chinese stays intact, and none of the editing-only UI is included.
+        """
 
         if self.preview.rowCount() == 0:
             self.show_error("无法打印", "当前没有可打印的程序单预览。")
             return None
-        # Capture the complete fixed template, not merely the scrolled visible
-        # portion of the table. This keeps the lower program rows and the
-        # right-most columns in the paper output.
-        old_size = self.preview.size()
-        old_horizontal = self.preview.horizontalScrollBar().value()
-        old_vertical = self.preview.verticalScrollBar().value()
-        full_width = self.preview.verticalHeader().width() + sum(self.preview.columnWidth(column) for column in range(self.preview.columnCount())) + 4
-        full_height = self.preview.horizontalHeader().height() + sum(self.preview.rowHeight(row) for row in range(self.preview.rowCount())) + 4
-        self.preview.resize(full_width, full_height)
-        QApplication.processEvents()
-        image = self.preview.grab()
-        self.preview.resize(old_size)
-        self.preview.horizontalScrollBar().setValue(old_horizontal)
-        self.preview.verticalScrollBar().setValue(old_vertical)
-        return image
+        table = self.preview
+        old_size = table.size()
+        old_minimum_size = table.minimumSize()
+        old_maximum_size = table.maximumSize()
+        old_horizontal = table.horizontalScrollBar().value()
+        old_vertical = table.verticalScrollBar().value()
+        old_horizontal_header = table.horizontalHeader().isVisible()
+        old_vertical_header = table.verticalHeader().isVisible()
+        old_horizontal_policy = table.horizontalScrollBarPolicy()
+        old_vertical_policy = table.verticalScrollBarPolicy()
+        selected_ranges = table.selectedRanges()
+        current_row, current_column = table.currentRow(), table.currentColumn()
+        selected_image = table.selected_image_id
+        try:
+            # The print sheet contains only Excel content: no A/B headers,
+            # row numbers, scroll bars, selection blue or resize handles.
+            table.clearSelection()
+            table.clear_image_selection()
+            table.horizontalHeader().setVisible(False)
+            table.verticalHeader().setVisible(False)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            table.horizontalScrollBar().setValue(0)
+            table.verticalScrollBar().setValue(0)
+            content_width = sum(table.columnWidth(column) for column in range(table.columnCount()))
+            content_height = sum(table.rowHeight(row) for row in range(table.rowCount()))
+            # ``table`` belongs to a splitter layout, which would otherwise
+            # immediately resize it back to the on-screen pane size. Hold the
+            # complete sheet dimensions only while it is being rendered.
+            table.setFixedSize(content_width + 2, content_height + 2)
+            table._reposition_image_overlays()
+            QApplication.processEvents()
+            source = table.viewport().rect()
+            if source.width() <= 0 or source.height() <= 0:
+                raise ValueError("程序单没有可打印的内容")
+            render_scale = 4
+            image = QImage(source.width() * render_scale, source.height() * render_scale, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#FFFFFF"))
+            painter = QPainter(image)
+            try:
+                painter.scale(render_scale, render_scale)
+                table.viewport().render(painter, QPoint(0, 0))
+            finally:
+                painter.end()
+            return image
+        finally:
+            table.setMinimumSize(old_minimum_size)
+            table.setMaximumSize(old_maximum_size)
+            table.resize(old_size)
+            table.horizontalHeader().setVisible(old_horizontal_header)
+            table.verticalHeader().setVisible(old_vertical_header)
+            table.setHorizontalScrollBarPolicy(old_horizontal_policy)
+            table.setVerticalScrollBarPolicy(old_vertical_policy)
+            table.horizontalScrollBar().setValue(old_horizontal)
+            table.verticalScrollBar().setValue(old_vertical)
+            table._reposition_image_overlays()
+            table.clearSelection()
+            for selected_range in selected_ranges:
+                table.setRangeSelected(selected_range, True)
+            if current_row >= 0 and current_column >= 0:
+                table.setCurrentCell(current_row, current_column)
+            if selected_image:
+                table.select_image(selected_image)
 
     @staticmethod
-    def _paint_sheet_on_printer(printer: QPrinter, image: QPixmap) -> None:
-        """Scale the captured template onto the printer's printable area."""
+    def _paint_sheet_on_printer(printer: QPrinter, image: QImage) -> None:
+        """Fit the clean high-resolution sheet into the printable page centre."""
 
         painter = QPainter(printer)
         try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            # The printer painter uses device pixels. Supplying an explicit
+            # target rectangle avoids QImage's own DPI metadata changing the
+            # apparent size on PDF versus a physical Windows printer.
             page = printer.pageRect(QPrinter.Unit.DevicePixel)
-            scaled = image.scaled(page.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(
-                round(page.x() + (page.width() - scaled.width()) / 2),
-                round(page.y() + (page.height() - scaled.height()) / 2),
-                scaled,
+            scale = min(page.width() / image.width(), page.height() / image.height())
+            width = image.width() * scale
+            height = image.height() * scale
+            target = QRectF(
+                page.x() + (page.width() - width) / 2,
+                page.y() + (page.height() - height) / 2,
+                width,
+                height,
             )
+            painter.drawImage(target, image, QRectF(0, 0, image.width(), image.height()))
         finally:
             painter.end()
 
