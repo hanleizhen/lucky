@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRectF, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QItemSelectionModel, QPoint, QRectF, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -818,6 +818,11 @@ class ExcelPreview(QTableWidget):
         self._redo_stack: list[list[tuple[str, str, str]]] = []
         self._known_values: dict[str, str] = {}
         self._history_applying = False
+        # Keep enough pointer state to distinguish a normal click from a
+        # drag-selection.  A click on an empty grid cell after a range has
+        # been selected is the familiar Excel way to dismiss that range.
+        self._range_selection_before_click = False
+        self._pointer_press_position = QPoint()
         # QTableWidget only contains an item at the top-left of an Excel
         # merged range.  Keep the mapping for every covered preview cell so
         # actions such as Ctrl+V still have a valid Excel anchor.
@@ -931,12 +936,60 @@ class ExcelPreview(QTableWidget):
 
         return self._selection_rectangle()
 
+    @staticmethod
+    def _is_plain_click(event: Any, press_position: QPoint) -> bool:
+        """Return whether a left-button event ended as a click, not a drag."""
+
+        return (
+            event.button() == Qt.MouseButton.LeftButton
+            and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            and (event.position().toPoint() - press_position).manhattanLength() <= 4
+        )
+
+    def _is_empty_grid_cell(self, index: Any) -> bool:
+        """Treat empty cells and the unused viewport below the sheet as blank."""
+
+        if not index.isValid():
+            return True
+        item = self.item(index.row(), index.column())
+        return item is None or not item.text().strip()
+
+    def _dismiss_range_selection(self, index: Any) -> None:
+        """Clear a visible range while retaining a keyboard/paste anchor cell."""
+
+        self.clearSelection()
+        if index.isValid():
+            # NoUpdate preserves the intentionally empty selection; using
+            # setCurrentCell() here would immediately select one cell again.
+            self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.clear_image_selection()
+
+    def mousePressEvent(self, event: Any) -> None:
+        """Remember whether a multi-cell range existed before a table click."""
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._range_selection_before_click = len(self.selectedIndexes()) > 1
+            self._pointer_press_position = event.position().toPoint()
+        else:
+            self._range_selection_before_click = False
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event: Any) -> None:
-        """Commit a pending print-range selection only after a drag finishes."""
+        """Commit a drag-selected print range or dismiss it from a blank click."""
 
         super().mouseReleaseEvent(event)
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        index = self.indexAt(event.position().toPoint())
+        if (
+            self._range_selection_before_click
+            and self._is_plain_click(event, self._pointer_press_position)
+            and self._is_empty_grid_cell(index)
+        ):
+            self._dismiss_range_selection(index)
+            self._range_selection_before_click = False
+            return
+        self._range_selection_before_click = False
         selection = self._selection_rectangle()
         if selection is not None:
             self.print_area_selection_finished.emit(*selection)
@@ -1220,6 +1273,13 @@ class ExcelPreview(QTableWidget):
         return False
 
     def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape and len(self.selectedIndexes()) > 1:
+            # Match the standard spreadsheet escape route as well as the
+            # mouse route above.  A single active cell remains available for
+            # keyboard editing, so Esc does not interfere with ordinary edits.
+            self._dismiss_range_selection(self.currentIndex())
+            event.accept()
+            return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
             self.find_replace_requested.emit(False)
             event.accept()

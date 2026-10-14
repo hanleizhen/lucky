@@ -3,6 +3,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTableWidgetSelectionRange
 
 from cnc_program_sheet.main import ExcelPreview
@@ -70,6 +72,45 @@ def test_preview_single_value_fills_the_selected_rectangle_like_excel() -> None:
         "客户备注",
     ]
     assert len(preview.selectedIndexes()) == 4
+    preview.close()
+    assert app is not None
+
+
+def test_preview_blank_cell_click_dismisses_a_multi_cell_selection() -> None:
+    """A blank-grid click cancels a range without losing its paste anchor."""
+
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.resize(900, 700)
+    preview.show()
+    app.processEvents()
+    preview.setCurrentCell(6, 1)
+    preview.setRangeSelected(QTableWidgetSelectionRange(6, 1, 7, 2), True)
+    assert len(preview.selectedIndexes()) == 4
+
+    # B15 is an unused, editable program-sheet cell in the standard template.
+    target = preview.model().index(14, 1)
+    assert preview.item(14, 1).text() == ""
+    QTest.mouseClick(preview.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, preview.visualRect(target).center())
+
+    assert preview.selectedIndexes() == []
+    assert (preview.currentRow(), preview.currentColumn()) == (14, 1)
+    preview.close()
+    assert app is not None
+
+
+def test_preview_escape_dismisses_a_multi_cell_selection() -> None:
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.setCurrentCell(6, 1)
+    preview.setRangeSelected(QTableWidgetSelectionRange(6, 1, 7, 2), True)
+
+    QTest.keyClick(preview, Qt.Key.Key_Escape)
+
+    assert preview.selectedIndexes() == []
+    assert (preview.currentRow(), preview.currentColumn()) == (6, 1)
     preview.close()
     assert app is not None
 
