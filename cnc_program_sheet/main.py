@@ -13,7 +13,7 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRectF, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -115,6 +115,7 @@ OPTIONAL_TOOLBAR_BUTTONS: tuple[tuple[str, str], ...] = (
     ("find_replace", "查找替换"),
     ("clear", "清空"),
     ("template", "打开模板"),
+    ("print_area", "打印区域"),
     ("print", "打印"),
     ("m06", "M06"),
     ("m304", "M304"),
@@ -780,6 +781,8 @@ class ExcelPreview(QTableWidget):
     image_geometry_changed = Signal(str, str, int, int, int, int)
     image_delete_requested = Signal(str)
     find_replace_requested = Signal(bool)
+    print_area_requested = Signal(int, int, int, int)
+    clear_print_area_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -840,8 +843,25 @@ class ExcelPreview(QTableWidget):
         index = self.indexAt(position)
         if not index.isValid():
             return
-        self.setCurrentCell(index.row(), index.column())
+        selection = self._selection_rectangle()
+        # Calling ``setCurrentCell`` unconditionally clears a multi-cell
+        # selection in Qt.  A right-click inside an existing Excel-like range
+        # must retain that whole range so the user can make it the print area.
+        if selection is None or not (
+            selection[0] <= index.row() <= selection[2]
+            and selection[1] <= index.column() <= selection[3]
+        ):
+            self.setCurrentCell(index.row(), index.column())
+            selection = (index.row(), index.column(), index.row(), index.column())
         menu = QMenu(self)
+        if selection is not None:
+            set_print_area = menu.addAction("设为打印区域（记住）")
+            set_print_area.triggered.connect(
+                lambda: self.print_area_requested.emit(*selection)
+            )
+        clear_print_area = menu.addAction("清除打印区域（恢复全表）")
+        clear_print_area.triggered.connect(self.clear_print_area_requested)
+        menu.addSeparator()
         find_replace = menu.addAction("查找/替换…")
         find_replace.triggered.connect(lambda: self.find_replace_requested.emit(True))
         menu.addSeparator()
@@ -884,6 +904,11 @@ class ExcelPreview(QTableWidget):
             max(index.row() for index in indexes),
             max(index.column() for index in indexes),
         )
+
+    def selected_cell_range(self) -> tuple[int, int, int, int] | None:
+        """Expose the current Excel-like rectangular selection to the window."""
+
+        return self._selection_rectangle()
 
     def _paste_anchor(self) -> tuple[int, int] | None:
         selection = self._selection_rectangle()
@@ -1553,6 +1578,8 @@ class SettingsDialog(QDialog):
         confirm_before_save: bool,
         open_folder_after_save: bool,
         toolbar_visibility: dict[str, bool],
+        print_orientation: str,
+        print_margin_mm: int,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1614,6 +1641,23 @@ class SettingsDialog(QDialog):
         toolbar_layout.addLayout(check_rows)
         toolbar_layout.addStretch(1)
         tabs.addTab(toolbar_page, "工具栏")
+
+        printing = QWidget()
+        print_form = QFormLayout(printing)
+        self.print_orientation = QComboBox()
+        self.print_orientation.addItem("▯ 竖向（默认）", "portrait")
+        self.print_orientation.addItem("▭ 横向", "landscape")
+        self.print_orientation.setCurrentIndex(0 if print_orientation != "landscape" else 1)
+        self.print_margin_mm = QSpinBox()
+        self.print_margin_mm.setRange(0, 30)
+        self.print_margin_mm.setSuffix(" mm")
+        self.print_margin_mm.setValue(max(0, min(30, print_margin_mm)))
+        print_form.addRow("默认方向：", self.print_orientation)
+        print_form.addRow("页面边距：", self.print_margin_mm)
+        print_note = QLabel("打印区域、方向与边距会自动记住。可先在主表格拖动框选，再点击“打印区域”或右键设为打印区域。")
+        print_note.setWordWrap(True)
+        print_form.addRow(print_note)
+        tabs.addTab(printing, "打印")
 
         reminders = QWidget()
         reminder_layout = QVBoxLayout(reminders)
@@ -1809,6 +1853,7 @@ class PrinterSelectionDialog(QDialog):
             return None
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setPrinterName(name)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
         printer.setPageOrientation(self.orientation.currentData())
         printer.setCopyCount(self.copies.value())
         return printer
@@ -1817,14 +1862,23 @@ class PrinterSelectionDialog(QDialog):
 class ProgramSheetPrintPreviewDialog(QDialog):
     """Printable sheet preview with explicit controls and wheel zoom."""
 
-    def __init__(self, printer: QPrinter, render_page: Callable[[QPrinter], None], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        printer: QPrinter,
+        render_page: Callable[[QPrinter], None],
+        print_area_label: str,
+        margin_mm: int,
+        preferences_changed: Callable[[QPageLayout.Orientation, int], None] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._printer = printer
         self._render_page = render_page
+        self._preferences_changed = preferences_changed
         self.setWindowTitle("打印预览 - CNC 程序单")
         self.resize(1020, 760)
         root = QVBoxLayout(self)
-        note = QLabel("鼠标滚轮：放大/缩小　·　“适应页面”可恢复完整预览")
+        note = QLabel(f"纸张：A4　·　打印区域：{print_area_label}　·　鼠标滚轮可放大/缩小")
         note.setStyleSheet("color: #335b7d;")
         root.addWidget(note)
         self.preview = WheelZoomPrintPreview(printer, self)
@@ -1857,6 +1911,14 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         self.orientation.setToolTip("选择纸张方向，预览会立即更新")
         self.orientation.currentIndexChanged.connect(self._change_orientation)
         controls.addWidget(self.orientation)
+        controls.addWidget(QLabel("边距："))
+        self.margin = QSpinBox()
+        self.margin.setRange(0, 30)
+        self.margin.setSuffix(" mm")
+        self.margin.setValue(margin_mm)
+        self.margin.setToolTip("调整打印区域距离纸张边缘的距离")
+        self.margin.valueChanged.connect(self._change_margin)
+        controls.addWidget(self.margin)
         controls.addStretch(1)
         print_button = QPushButton("打印")
         print_button.setObjectName("primaryButton")
@@ -1881,7 +1943,16 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         if orientation is None:
             return
         self._printer.setPageOrientation(orientation)
+        self._save_preferences()
         self.preview.updatePreview()
+
+    def _change_margin(self) -> None:
+        self._save_preferences()
+        self.preview.updatePreview()
+
+    def _save_preferences(self) -> None:
+        if self._preferences_changed is not None:
+            self._preferences_changed(self._printer.pageLayout().orientation(), self.margin.value())
 
     def _print(self) -> None:
         dialog = PrinterSelectionDialog(self._printer.pageLayout().orientation(), self)
@@ -1891,6 +1962,8 @@ class ProgramSheetPrintPreviewDialog(QDialog):
         if printer is None:
             QMessageBox.warning(self, "未找到打印机", "Windows 当前没有可用打印机，请先安装或连接打印机。")
             return
+        self._printer.setPageOrientation(printer.pageLayout().orientation())
+        self._save_preferences()
         self._render_page(printer)
 
 
@@ -2023,6 +2096,10 @@ class MainWindow(QMainWindow):
         template = QPushButton("打开模板")
         template.clicked.connect(self.open_template)
         toolbar.addWidget(template)
+        print_area = QPushButton("打印区域")
+        print_area.clicked.connect(self.set_print_area_from_selection)
+        print_area.setToolTip("先框选右侧表格，再点击此按钮，记住要打印的区域")
+        toolbar.addWidget(print_area)
         print_sheet = QPushButton("打印")
         print_sheet.clicked.connect(self.preview_program_sheet)
         print_sheet.setToolTip("先预览纸张方向、分页与缩放效果，再选择打印机")
@@ -2058,6 +2135,7 @@ class MainWindow(QMainWindow):
             "find_replace": find_replace,
             "clear": clear,
             "template": template,
+            "print_area": print_area,
             "print": print_sheet,
             "m06": m06,
             "m304": m304,
@@ -2113,6 +2191,8 @@ class MainWindow(QMainWindow):
         self.preview.image_geometry_changed.connect(self._update_image_geometry)
         self.preview.image_delete_requested.connect(self._remove_image_by_id)
         self.preview.find_replace_requested.connect(self.open_find_replace)
+        self.preview.print_area_requested.connect(self.set_print_area)
+        self.preview.clear_print_area_requested.connect(self.clear_print_area)
         # Child widgets normally consume Ctrl+V themselves. Intercept it
         # before an Excel/result cell can interpret copied NC code as plain
         # text, while leaving ordinary text paste untouched for editing.
@@ -2294,11 +2374,86 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("没有可重做的表格编辑。", 2500)
 
+    def _print_area_key(self) -> str:
+        return str(self.template_path.resolve()) if self.template_path is not None else "__default_template__"
+
+    def _full_print_area(self) -> tuple[int, int, int, int]:
+        return (0, 0, max(0, self.preview.rowCount() - 1), max(0, self.preview.columnCount() - 1))
+
+    @staticmethod
+    def _print_area_label(area: tuple[int, int, int, int]) -> str:
+        top, left, bottom, right = area
+        start = ExcelPreview._column_name(left + 1) + str(top + 1)
+        end = ExcelPreview._column_name(right + 1) + str(bottom + 1)
+        return f"{start}:{end}"
+
+    def _saved_print_area(self) -> tuple[int, int, int, int]:
+        full = self._full_print_area()
+        saved = self.settings.get("print_areas", {})
+        raw = saved.get(self._print_area_key()) if isinstance(saved, dict) else None
+        if not isinstance(raw, list) or len(raw) != 4 or not all(isinstance(value, int) for value in raw):
+            return full
+        top, left, bottom, right = raw
+        if top < 0 or left < 0 or bottom < top or right < left or bottom >= self.preview.rowCount() or right >= self.preview.columnCount():
+            return full
+        return top, left, bottom, right
+
+    def set_print_area_from_selection(self) -> None:
+        area = self.preview.selected_cell_range()
+        if area is None:
+            self.show_error("请选择打印区域", "请先在右侧表格中拖动框选要打印的单元格，再点击“打印区域”。")
+            return
+        self.set_print_area(*area)
+
+    def set_print_area(self, top: int, left: int, bottom: int, right: int) -> None:
+        """Persist a rectangular Excel range for this template's future prints."""
+
+        full = self._full_print_area()
+        top, left = max(0, top), max(0, left)
+        bottom, right = min(full[2], bottom), min(full[3], right)
+        if bottom < top or right < left:
+            self.show_error("无法设置打印区域", "当前框选区域无效。")
+            return
+        areas = self.settings.get("print_areas", {})
+        if not isinstance(areas, dict):
+            areas = {}
+        area = (top, left, bottom, right)
+        areas[self._print_area_key()] = list(area)
+        self.settings["print_areas"] = areas
+        save_settings(self.settings)
+        self.statusBar().showMessage(f"已记住打印区域：{self._print_area_label(area)}", 4000)
+
+    def clear_print_area(self) -> None:
+        areas = self.settings.get("print_areas", {})
+        if isinstance(areas, dict):
+            areas.pop(self._print_area_key(), None)
+            self.settings["print_areas"] = areas
+            save_settings(self.settings)
+        self.statusBar().showMessage("已清除打印区域，将打印整张表。", 3500)
+
+    def _configured_print_orientation(self) -> QPageLayout.Orientation:
+        return (
+            QPageLayout.Orientation.Landscape
+            if self.settings.get("print_orientation") == "landscape"
+            else QPageLayout.Orientation.Portrait
+        )
+
+    def _configured_print_margin_mm(self) -> int:
+        try:
+            return max(0, min(30, int(self.settings.get("print_margin_mm", 8))))
+        except (TypeError, ValueError):
+            return 8
+
+    def _save_print_preferences(self, orientation: QPageLayout.Orientation, margin_mm: int) -> None:
+        self.settings["print_orientation"] = "landscape" if orientation == QPageLayout.Orientation.Landscape else "portrait"
+        self.settings["print_margin_mm"] = max(0, min(30, int(margin_mm)))
+        save_settings(self.settings)
+
     def _capture_sheet_for_printing(self) -> QImage | None:
         """Render a clean, high-resolution sheet image for dependable printing.
 
         Qt's PDF/vector painter can replace Chinese glyphs with empty squares
-        on some Windows systems. We therefore render the sheet viewport at four
+        on some Windows systems. We therefore render the sheet viewport at five
         times its screen size: text, lines, and pasted pictures remain crisp,
         Chinese stays intact, and none of the editing-only UI is included.
         """
@@ -2341,7 +2496,13 @@ class MainWindow(QMainWindow):
             source = table.viewport().rect()
             if source.width() <= 0 or source.height() <= 0:
                 raise ValueError("程序单没有可打印的内容")
-            render_scale = 4
+            # Five times the on-screen resolution gives clean fine grid lines
+            # on ordinary office printers, while the cap avoids excessive RAM
+            # use for a custom oversized template.
+            render_scale = 5
+            max_pixels = 60_000_000
+            while render_scale > 2 and source.width() * source.height() * render_scale * render_scale > max_pixels:
+                render_scale -= 1
             image = QImage(source.width() * render_scale, source.height() * render_scale, QImage.Format.Format_ARGB32)
             image.fill(QColor("#FFFFFF"))
             painter = QPainter(image)
@@ -2350,7 +2511,21 @@ class MainWindow(QMainWindow):
                 table.viewport().render(painter, QPoint(0, 0))
             finally:
                 painter.end()
-            return image
+            top, left, bottom, right = self._saved_print_area()
+            x = sum(table.columnWidth(column) for column in range(left))
+            y = sum(table.rowHeight(row) for row in range(top))
+            width = sum(table.columnWidth(column) for column in range(left, right + 1))
+            height = sum(table.rowHeight(row) for row in range(top, bottom + 1))
+            cropped = image.copy(x * render_scale, y * render_scale, width * render_scale, height * render_scale)
+            # QTableWidget's grid does not always draw an outside edge. Add a
+            # stable printed border like Excel/WPS around the chosen region.
+            border_painter = QPainter(cropped)
+            try:
+                border_painter.setPen(QPen(QColor("#000000"), max(2, render_scale)))
+                border_painter.drawRect(0, 0, cropped.width() - 1, cropped.height() - 1)
+            finally:
+                border_painter.end()
+            return cropped
         finally:
             table.setMinimumSize(old_minimum_size)
             table.setMaximumSize(old_maximum_size)
@@ -2371,7 +2546,7 @@ class MainWindow(QMainWindow):
                 table.select_image(selected_image)
 
     @staticmethod
-    def _paint_sheet_on_printer(printer: QPrinter, image: QImage) -> None:
+    def _paint_sheet_on_printer(printer: QPrinter, image: QImage, margin_mm: int = 8) -> None:
         """Fit the clean high-resolution sheet into the printable page centre."""
 
         painter = QPainter(printer)
@@ -2381,12 +2556,19 @@ class MainWindow(QMainWindow):
             # target rectangle avoids QImage's own DPI metadata changing the
             # apparent size on PDF versus a physical Windows printer.
             page = printer.pageRect(QPrinter.Unit.DevicePixel)
-            scale = min(page.width() / image.width(), page.height() / image.height())
+            margin_pixels = max(0, min(30, margin_mm)) * printer.resolution() / 25.4
+            printable = QRectF(
+                page.x() + margin_pixels,
+                page.y() + margin_pixels,
+                max(1.0, page.width() - margin_pixels * 2),
+                max(1.0, page.height() - margin_pixels * 2),
+            )
+            scale = min(printable.width() / image.width(), printable.height() / image.height())
             width = image.width() * scale
             height = image.height() * scale
             target = QRectF(
-                page.x() + (page.width() - width) / 2,
-                page.y() + (page.height() - height) / 2,
+                printable.x() + (printable.width() - width) / 2,
+                printable.y() + (printable.height() - height) / 2,
                 width,
                 height,
             )
@@ -2401,10 +2583,15 @@ class MainWindow(QMainWindow):
         if image is None:
             return
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(self._configured_print_orientation())
+        area_label = self._print_area_label(self._saved_print_area())
         dialog = ProgramSheetPrintPreviewDialog(
             printer,
-            lambda target_printer: self._paint_sheet_on_printer(target_printer, image),
+            lambda target_printer: self._paint_sheet_on_printer(target_printer, image, self._configured_print_margin_mm()),
+            area_label,
+            self._configured_print_margin_mm(),
+            self._save_print_preferences,
             self,
         )
         dialog.exec()
@@ -3123,6 +3310,8 @@ class MainWindow(QMainWindow):
             bool(self.settings.get("confirm_before_save", False)),
             bool(self.settings.get("open_folder_after_save", False)),
             self.settings.get("toolbar_button_visibility", {}) if isinstance(self.settings.get("toolbar_button_visibility", {}), dict) else {},
+            str(self.settings.get("print_orientation", "portrait")),
+            self._configured_print_margin_mm(),
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -3136,6 +3325,8 @@ class MainWindow(QMainWindow):
             self.settings["toolbar_button_visibility"] = {
                 key: checkbox.isChecked() for key, checkbox in dialog.toolbar_buttons.items()
             }
+            self.settings["print_orientation"] = str(dialog.print_orientation.currentData())
+            self.settings["print_margin_mm"] = dialog.print_margin_mm.value()
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
