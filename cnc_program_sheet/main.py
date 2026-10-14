@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QStyledItemDelegate,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -97,6 +98,8 @@ IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 ROTATION_MARKERS = ("❮Y⟲180°❯", "❮X⟲180°❯", "❮Z⟲180°❯")
 MARKER_RED = QColor("#FF0000")
 DEFAULT_SELECTION_COLOR = "#B7D7FF"
+DEFAULT_WINDOW_COLOR = "#F6F8FB"
+DEFAULT_DARK_WINDOW_COLOR = "#202936"
 CONVERSION_TAG_BACKGROUND = QColor("#DDEBF7")
 CONVERSION_TAG_FOREGROUND = QColor("#1F4E78")
 CONVERSION_TAGS = {
@@ -312,10 +315,159 @@ QTableWidget#excelPreview QHeaderView::section {
 """
 
 
-def apply_application_theme(application: QApplication) -> None:
+_DARK_THEME_OVERRIDES = """
+QWidget {
+    color: #E6EDF5;
+}
+QMainWindow, QDialog, QMessageBox {
+    background: {window_color};
+}
+QLabel {
+    color: #D8E2EE;
+}
+QPushButton {
+    color: #E6EDF5;
+    background: #2B3747;
+    border-color: #4A5D73;
+}
+QPushButton:hover {
+    background: #35465A;
+    border-color: #76A9E0;
+}
+QPushButton:pressed {
+    background: #1E2B3A;
+    border-color: #5C9BD5;
+}
+QPushButton:disabled {
+    color: #718096;
+    background: #253140;
+    border-color: #344457;
+}
+QPushButton#primaryButton {
+    color: #FFFFFF;
+    background: #1677C8;
+    border-color: #1677C8;
+}
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
+    color: #E6EDF5;
+    background: #253140;
+    border-color: #4A5D73;
+    selection-background-color: #245B85;
+    selection-color: #FFFFFF;
+}
+QComboBox QAbstractItemView {
+    color: #E6EDF5;
+    background: #253140;
+    border-color: #4A5D73;
+    selection-background-color: #35465A;
+    selection-color: #FFFFFF;
+}
+QTableWidget, QListWidget {
+    color: #E6EDF5;
+    background: #253140;
+    border-color: #4A5D73;
+    alternate-background-color: #2B3747;
+    gridline-color: #4A5D73;
+}
+QTableWidget::item:selected, QListWidget::item:selected {
+    color: #FFFFFF;
+    background: #245B85;
+}
+QHeaderView::section {
+    color: #D8E2EE;
+    background: #2B3747;
+    border-right-color: #4A5D73;
+    border-bottom-color: #4A5D73;
+}
+QTabWidget::pane {
+    background: #253140;
+    border-color: #4A5D73;
+}
+QTabBar::tab {
+    color: #B8C7D9;
+    background: #2B3747;
+    border-color: #4A5D73;
+}
+QTabBar::tab:selected {
+    color: #8CC7FF;
+    background: #253140;
+}
+QMenu {
+    color: #E6EDF5;
+    background: #253140;
+    border-color: #4A5D73;
+}
+QMenu::item:selected {
+    color: #FFFFFF;
+    background: #245B85;
+}
+QMenu::item:disabled {
+    color: #718096;
+}
+QMenu::separator {
+    background: #4A5D73;
+}
+QStatusBar {
+    color: #B8C7D9;
+    background: #1E2936;
+    border-top-color: #4A5D73;
+}
+#dropArea, #conversionDropArea {
+    color: #A9D8FF;
+    background: #1D354B;
+    border-color: #4C93C6;
+}
+QTableWidget#excelPreview {
+    color: #000000;
+    background: #FFFFFF;
+    gridline-color: #000000;
+    border-color: #000000;
+}
+QTableWidget#excelPreview::item {
+    border-color: #000000;
+}
+QTableWidget#excelPreview QHeaderView::section {
+    color: #1F2937;
+    background: #FFFFFF;
+    border-color: #000000;
+}
+QTableWidget#excelPreview QLineEdit {
+    color: #000000;
+    background: #FFFFFF;
+    border-color: #2684D9;
+}
+"""
+
+
+def _normalized_window_color(color_name: str, appearance_mode: str) -> str:
+    """Return a valid saved shell colour, without affecting the worksheet."""
+
+    color = QColor(color_name)
+    if color.isValid():
+        return color.name()
+    return DEFAULT_DARK_WINDOW_COLOR if appearance_mode == "dark" else DEFAULT_WINDOW_COLOR
+
+
+def application_style_sheet(appearance_mode: str = "light", window_color: str = DEFAULT_WINDOW_COLOR) -> str:
+    """Build the application chrome theme while leaving the Excel sheet intact."""
+
+    mode = "dark" if appearance_mode == "dark" else "light"
+    normalized_color = _normalized_window_color(window_color, mode)
+    if mode == "dark":
+        return APPLICATION_STYLE_SHEET + _DARK_THEME_OVERRIDES.replace("{window_color}", normalized_color)
+    if normalized_color == QColor(DEFAULT_WINDOW_COLOR).name():
+        return APPLICATION_STYLE_SHEET
+    return APPLICATION_STYLE_SHEET.replace("background: #F6F8FB;", f"background: {normalized_color};", 1)
+
+
+def apply_application_theme(
+    application: QApplication,
+    appearance_mode: str = "light",
+    window_color: str = DEFAULT_WINDOW_COLOR,
+) -> None:
     """Install the shared, non-functional desktop visual system."""
 
-    application.setStyleSheet(APPLICATION_STYLE_SHEET)
+    application.setStyleSheet(application_style_sheet(appearance_mode, window_color))
 
 
 def natural_program_sort_key(name: str) -> tuple[object, ...]:
@@ -982,6 +1134,29 @@ class FloatingImageOverlay(QWidget):
                 )
 
 
+class SpreadsheetAlignmentDelegate(QStyledItemDelegate):
+    """Make the temporary Qt editor use the cell's saved Excel alignment."""
+
+    def createEditor(self, parent: QWidget, option: Any, index: Any) -> QWidget:
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            stored_alignment = index.data(Qt.ItemDataRole.TextAlignmentRole)
+            try:
+                alignment = Qt.AlignmentFlag(int(stored_alignment))
+            except (TypeError, ValueError):
+                alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            horizontal = alignment & (
+                Qt.AlignmentFlag.AlignLeft
+                | Qt.AlignmentFlag.AlignRight
+                | Qt.AlignmentFlag.AlignHCenter
+                | Qt.AlignmentFlag.AlignJustify
+            )
+            if not horizontal:
+                alignment |= Qt.AlignmentFlag.AlignLeft
+            editor.setAlignment(alignment | Qt.AlignmentFlag.AlignVCenter)
+        return editor
+
+
 class ExcelPreview(QTableWidget):
     """Editable in-app preview of the real sheet values and major formatting."""
 
@@ -1042,6 +1217,11 @@ class ExcelPreview(QTableWidget):
             | QTableWidget.EditTrigger.EditKeyPressed
             | QTableWidget.EditTrigger.AnyKeyPressed
         )
+        # Qt's stock editor is always left aligned. The delegate makes its
+        # short-lived input field match the centre/left/right alignment that
+        # came from the Excel template, then hands the unchanged text back to
+        # the existing editing and undo pipeline.
+        self.setItemDelegate(SpreadsheetAlignmentDelegate(self))
         # Some Windows palettes use white text for a selected table item.
         # That makes the contents appear to disappear on a light template, so
         # give the selection an explicit Excel-like blue fill and dark text.
@@ -1884,11 +2064,13 @@ class SettingsDialog(QDialog):
         print_orientation: str,
         print_margin_mm: int,
         selection_color: str,
+        appearance_mode: str = "light",
+        window_color: str = DEFAULT_WINDOW_COLOR,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(540, 375)
+        self.resize(560, 405)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
@@ -1915,6 +2097,44 @@ class SettingsDialog(QDialog):
         general_layout.addWidget(self.open_folder_after_save)
         general_layout.addStretch(1)
         tabs.addTab(general, "常规")
+
+        appearance = QWidget()
+        appearance_layout = QVBoxLayout(appearance)
+        appearance_note = QLabel(
+            "深色模式只改变软件窗口、工具栏、菜单和设置界面；Excel 程序单始终保持白底黑线，"
+            "因此不会影响阅读、导出或打印。"
+        )
+        appearance_note.setWordWrap(True)
+        appearance_layout.addWidget(appearance_note)
+        self.appearance_mode = QComboBox()
+        self.appearance_mode.addItem("浅色模式（默认）", "light")
+        self.appearance_mode.addItem("深色模式", "dark")
+        self.appearance_mode.setCurrentIndex(1 if appearance_mode == "dark" else 0)
+        appearance_layout.addWidget(QLabel("界面模式："))
+        appearance_layout.addWidget(self.appearance_mode)
+        self.window_color = QLineEdit(_normalized_window_color(window_color, self.selected_appearance_mode()))
+        self.window_color.setMaxLength(7)
+        self.window_color.setPlaceholderText("#F6F8FB")
+        self.window_color.setToolTip("输入 #RRGGBB，或点击“选择颜色”使用调色板")
+        self.window_color.textChanged.connect(self._refresh_window_color_sample)
+        self.window_color_sample = QLabel("窗口颜色示例")
+        self.window_color_sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.window_color_sample.setMinimumWidth(100)
+        choose_window_color = QPushButton("选择颜色…")
+        choose_window_color.clicked.connect(self._choose_window_color)
+        restore_window_color = QPushButton("默认")
+        restore_window_color.clicked.connect(self._restore_default_window_color)
+        window_color_row = QHBoxLayout()
+        window_color_row.addWidget(self.window_color, 1)
+        window_color_row.addWidget(self.window_color_sample)
+        window_color_row.addWidget(choose_window_color)
+        window_color_row.addWidget(restore_window_color)
+        appearance_layout.addWidget(QLabel("自定义窗口颜色："))
+        appearance_layout.addLayout(window_color_row)
+        self.appearance_mode.currentIndexChanged.connect(lambda _index: self._refresh_window_color_sample())
+        self._refresh_window_color_sample()
+        appearance_layout.addStretch(1)
+        tabs.addTab(appearance, "外观")
 
         editing = QWidget()
         editing_layout = QVBoxLayout(editing)
@@ -2019,6 +2239,12 @@ class SettingsDialog(QDialog):
 
         return self._normalized_selection_color(self.selection_color.text().strip())
 
+    def selected_appearance_mode(self) -> str:
+        return "dark" if self.appearance_mode.currentData() == "dark" else "light"
+
+    def selected_window_color(self) -> str:
+        return _normalized_window_color(self.window_color.text().strip(), self.selected_appearance_mode())
+
     def _refresh_selection_color_sample(self) -> None:
         color = self.selected_selection_color()
         self.selection_color_sample.setStyleSheet(
@@ -2029,6 +2255,22 @@ class SettingsDialog(QDialog):
         color = QColorDialog.getColor(QColor(self.selected_selection_color()), self, "选择框选颜色")
         if color.isValid():
             self.selection_color.setText(color.name())
+
+    def _refresh_window_color_sample(self) -> None:
+        color = self.selected_window_color()
+        preview_text = "#FFFFFF" if QColor(color).lightness() < 128 else "#1F2937"
+        self.window_color_sample.setStyleSheet(
+            f"background-color: {color}; color: {preview_text}; border: 1px solid {QColor(color).darker(145).name()};"
+        )
+
+    def _choose_window_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self.selected_window_color()), self, "选择窗口颜色")
+        if color.isValid():
+            self.window_color.setText(color.name())
+
+    def _restore_default_window_color(self) -> None:
+        default = DEFAULT_DARK_WINDOW_COLOR if self.selected_appearance_mode() == "dark" else DEFAULT_WINDOW_COLOR
+        self.window_color.setText(default)
 
 
 class FindReplaceDialog(QDialog):
@@ -2331,13 +2573,17 @@ class ProgramSheetPrintPreviewDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.settings = load_settings()
         application = QApplication.instance()
         if application is not None:
             # Tests and small support launchers sometimes construct the
             # window directly instead of calling run(); keep their visual
             # baseline identical to the normal desktop entry point.
-            apply_application_theme(application)
-        self.settings = load_settings()
+            apply_application_theme(
+                application,
+                str(self.settings.get("appearance_mode", "light")),
+                str(self.settings.get("window_color", DEFAULT_WINDOW_COLOR)),
+            )
         # ``None`` is an intentional visual spacer inserted by the operator.
         # Keeping it in the row list means programs below the spacer retain
         # their exact Excel row when the workbook is exported.
@@ -3764,7 +4010,9 @@ class MainWindow(QMainWindow):
             str(self.settings.get("print_orientation", "portrait")),
             self._configured_print_margin_mm(),
             str(self.settings.get("selection_color", DEFAULT_SELECTION_COLOR)),
-            self,
+            str(self.settings.get("appearance_mode", "light")),
+            str(self.settings.get("window_color", DEFAULT_WINDOW_COLOR)),
+            parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["update_repository"] = dialog.repository.text().strip()
@@ -3780,12 +4028,21 @@ class MainWindow(QMainWindow):
             self.settings["print_orientation"] = str(dialog.print_orientation.currentData())
             self.settings["print_margin_mm"] = dialog.print_margin_mm.value()
             self.settings["selection_color"] = dialog.selected_selection_color()
+            self.settings["appearance_mode"] = dialog.selected_appearance_mode()
+            self.settings["window_color"] = dialog.selected_window_color()
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
             self._apply_toolbar_button_visibility()
+            application = QApplication.instance()
+            if application is not None:
+                apply_application_theme(
+                    application,
+                    self.settings["appearance_mode"],
+                    self.settings["window_color"],
+                )
             self.preview.set_selection_color(self.settings["selection_color"])
             self.statusBar().showMessage("设置已保存。", 3500)
 
@@ -4045,7 +4302,12 @@ class MainWindow(QMainWindow):
 def run() -> int:
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
-    apply_application_theme(app)
+    appearance_settings = load_settings()
+    apply_application_theme(
+        app,
+        str(appearance_settings.get("appearance_mode", "light")),
+        str(appearance_settings.get("window_color", DEFAULT_WINDOW_COLOR)),
+    )
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("CNCProgramSheet")
     icon = QIcon(str(resource_path("assets", APP_ICON_FILE)))

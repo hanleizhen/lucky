@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QTableWidgetSelectionRange
+from PySide6.QtWidgets import QApplication, QLineEdit, QTableWidgetSelectionRange
 
 from cnc_program_sheet.main import ExcelPreview
 
@@ -155,6 +155,29 @@ def test_preview_selection_color_can_be_changed() -> None:
     assert preview.set_selection_color("#C6EFCE") == "#c6efce"
     assert "#c6efce" in preview.styleSheet()
     assert preview.set_selection_color("invalid") == "#b7d7ff"
+    preview.close()
+    assert app is not None
+
+
+def test_cell_editor_inherits_the_excel_cell_alignment() -> None:
+    """Editing a centred template cell must not temporarily look left-aligned."""
+
+    app = QApplication.instance() or QApplication([])
+    preview = ExcelPreview()
+    preview.load_template(Path("assets/CNC程序单.xlsx"))
+    preview.resize(900, 700)
+    preview.show()
+    app.processEvents()
+
+    item = preview.item(8, 1)  # B9, an empty but centre-aligned program-name cell.
+    assert item is not None
+    assert item.textAlignment() & int(Qt.AlignmentFlag.AlignHCenter)
+    preview.editItem(item)
+    app.processEvents()
+
+    editors = [editor for editor in preview.findChildren(QLineEdit) if editor.isVisible()]
+    assert len(editors) == 1
+    assert editors[0].alignment() & Qt.AlignmentFlag.AlignHCenter
     preview.close()
     assert app is not None
 
