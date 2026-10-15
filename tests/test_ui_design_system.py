@@ -7,8 +7,10 @@ from PySide6.QtWidgets import QApplication, QPushButton
 from cnc_program_sheet.main import (
     APPLICATION_STYLE_SHEET,
     DEFAULT_DARK_WINDOW_COLOR,
+    LEGACY_DEFAULT_DARK_WINDOW_COLOR,
     MainWindow,
     SettingsDialog,
+    _normalized_window_color,
     application_style_sheet,
     apply_application_theme,
 )
@@ -98,3 +100,11 @@ def test_dark_mode_and_custom_window_colour_keep_the_excel_sheet_light() -> None
         settings.close()
     finally:
         app.setStyleSheet(original)
+
+
+def test_dark_mode_defaults_to_black_with_white_text_and_migrates_the_old_default() -> None:
+    style = application_style_sheet("dark")
+    assert DEFAULT_DARK_WINDOW_COLOR == "#121212"
+    assert "background: #121212;" in style
+    assert "color: #FFFFFF;" in style
+    assert _normalized_window_color(LEGACY_DEFAULT_DARK_WINDOW_COLOR, "dark") == DEFAULT_DARK_WINDOW_COLOR

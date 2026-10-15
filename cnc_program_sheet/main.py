@@ -100,7 +100,8 @@ ROTATION_MARKERS = ("❮Y⟲180°❯", "❮X⟲180°❯", "❮Z⟲180°❯")
 MARKER_RED = QColor("#FF0000")
 DEFAULT_SELECTION_COLOR = "#B7D7FF"
 DEFAULT_WINDOW_COLOR = "#F6F8FB"
-DEFAULT_DARK_WINDOW_COLOR = "#202936"
+DEFAULT_DARK_WINDOW_COLOR = "#121212"
+LEGACY_DEFAULT_DARK_WINDOW_COLOR = "#202936"
 # Two rapid attempts at the same operation count as consecutive.  A later
 # attempt is treated as a fresh task, not something to nudge a user about.
 REPEATED_ERROR_WINDOW_SECONDS = 60.0
@@ -321,31 +322,31 @@ QTableWidget#excelPreview QHeaderView::section {
 
 _DARK_THEME_OVERRIDES = """
 QWidget {
-    color: #E6EDF5;
+    color: #FFFFFF;
 }
 QMainWindow, QDialog, QMessageBox {
     background: {window_color};
 }
 QLabel {
-    color: #D8E2EE;
+    color: #FFFFFF;
 }
 QPushButton {
-    color: #E6EDF5;
-    background: #2B3747;
-    border-color: #4A5D73;
+    color: #FFFFFF;
+    background: #1D1D1D;
+    border-color: #4D4D4D;
 }
 QPushButton:hover {
-    background: #35465A;
-    border-color: #76A9E0;
+    background: #2B2B2B;
+    border-color: #77B7F0;
 }
 QPushButton:pressed {
-    background: #1E2B3A;
+    background: #080808;
     border-color: #5C9BD5;
 }
 QPushButton:disabled {
-    color: #718096;
-    background: #253140;
-    border-color: #344457;
+    color: #7D7D7D;
+    background: #171717;
+    border-color: #303030;
 }
 QPushButton#primaryButton {
     color: #FFFFFF;
@@ -353,73 +354,73 @@ QPushButton#primaryButton {
     border-color: #1677C8;
 }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
-    color: #E6EDF5;
-    background: #253140;
-    border-color: #4A5D73;
-    selection-background-color: #245B85;
+    color: #FFFFFF;
+    background: #101010;
+    border-color: #505050;
+    selection-background-color: #0F6CBD;
     selection-color: #FFFFFF;
 }
 QComboBox QAbstractItemView {
-    color: #E6EDF5;
-    background: #253140;
-    border-color: #4A5D73;
-    selection-background-color: #35465A;
+    color: #FFFFFF;
+    background: #101010;
+    border-color: #505050;
+    selection-background-color: #2B2B2B;
     selection-color: #FFFFFF;
 }
 QTableWidget, QListWidget {
-    color: #E6EDF5;
-    background: #253140;
-    border-color: #4A5D73;
-    alternate-background-color: #2B3747;
-    gridline-color: #4A5D73;
+    color: #FFFFFF;
+    background: #101010;
+    border-color: #505050;
+    alternate-background-color: #1D1D1D;
+    gridline-color: #505050;
 }
 QTableWidget::item:selected, QListWidget::item:selected {
     color: #FFFFFF;
-    background: #245B85;
+    background: #0F6CBD;
 }
 QHeaderView::section {
-    color: #D8E2EE;
-    background: #2B3747;
-    border-right-color: #4A5D73;
-    border-bottom-color: #4A5D73;
+    color: #FFFFFF;
+    background: #1D1D1D;
+    border-right-color: #505050;
+    border-bottom-color: #505050;
 }
 QTabWidget::pane {
-    background: #253140;
-    border-color: #4A5D73;
+    background: #101010;
+    border-color: #505050;
 }
 QTabBar::tab {
-    color: #B8C7D9;
-    background: #2B3747;
-    border-color: #4A5D73;
+    color: #D8D8D8;
+    background: #1D1D1D;
+    border-color: #505050;
 }
 QTabBar::tab:selected {
-    color: #8CC7FF;
-    background: #253140;
+    color: #FFFFFF;
+    background: #101010;
 }
 QMenu {
-    color: #E6EDF5;
-    background: #253140;
-    border-color: #4A5D73;
+    color: #FFFFFF;
+    background: #101010;
+    border-color: #505050;
 }
 QMenu::item:selected {
     color: #FFFFFF;
-    background: #245B85;
+    background: #0F6CBD;
 }
 QMenu::item:disabled {
-    color: #718096;
+    color: #7D7D7D;
 }
 QMenu::separator {
-    background: #4A5D73;
+    background: #505050;
 }
 QStatusBar {
-    color: #B8C7D9;
-    background: #1E2936;
-    border-top-color: #4A5D73;
+    color: #FFFFFF;
+    background: #080808;
+    border-top-color: #505050;
 }
 #dropArea, #conversionDropArea {
-    color: #A9D8FF;
-    background: #1D354B;
-    border-color: #4C93C6;
+    color: #FFFFFF;
+    background: #151515;
+    border-color: #6EB5EE;
 }
 QTableWidget#excelPreview {
     color: #000000;
@@ -448,7 +449,16 @@ def _normalized_window_color(color_name: str, appearance_mode: str) -> str:
 
     color = QColor(color_name)
     if color.isValid():
-        return color.name()
+        normalized = color.name()
+        # Existing installations can contain either the former dark default
+        # or the light-mode default. Both are application defaults, not an
+        # operator's intentional custom dark colour, so migrate them to black.
+        if appearance_mode == "dark" and normalized in {
+            LEGACY_DEFAULT_DARK_WINDOW_COLOR,
+            DEFAULT_WINDOW_COLOR.casefold(),
+        }:
+            return DEFAULT_DARK_WINDOW_COLOR
+        return normalized
     return DEFAULT_DARK_WINDOW_COLOR if appearance_mode == "dark" else DEFAULT_WINDOW_COLOR
 
 
