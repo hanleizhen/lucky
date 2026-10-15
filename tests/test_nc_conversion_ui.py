@@ -228,7 +228,7 @@ def test_partial_conversion_success_is_not_lost_when_a_later_file_fails(tmp_path
         return Path(path)
 
     monkeypatch.setattr(app_main, "transform_file", transform)
-    monkeypatch.setattr(app_main.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_main.ApplicationDialog, "exec", lambda *args, **kwargs: 0)
     dialog.apply_conversion()
 
     assert dialog.converted_files == [

@@ -4,6 +4,7 @@ import ctypes
 import os
 import re
 import sys
+import time
 import traceback
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, replace
@@ -32,7 +33,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -69,6 +69,7 @@ from .excel_service import (
     output_filename,
     verify_template,
 )
+from .error_dialog import ApplicationDialog, ErrorDialog
 from .models import ImagePlacement, ProgramRecord, UNRECOGNIZED
 from .nc_parser import parse_file_records, parse_records_text
 from .nc_transform import TransformMode, decode_windows_default, encode_windows_default, transform_file
@@ -100,6 +101,9 @@ MARKER_RED = QColor("#FF0000")
 DEFAULT_SELECTION_COLOR = "#B7D7FF"
 DEFAULT_WINDOW_COLOR = "#F6F8FB"
 DEFAULT_DARK_WINDOW_COLOR = "#202936"
+# Two rapid attempts at the same operation count as consecutive.  A later
+# attempt is treated as a fresh task, not something to nudge a user about.
+REPEATED_ERROR_WINDOW_SECONDS = 60.0
 CONVERSION_TAG_BACKGROUND = QColor("#DDEBF7")
 CONVERSION_TAG_FOREGROUND = QColor("#1F4E78")
 CONVERSION_TAGS = {
@@ -795,12 +799,23 @@ class NcConversionDialog(QDialog):
             return
         text = mime_data.text() if mime_data.hasText() else ""
         if not is_nc_program_text(text):
-            QMessageBox.information(self, "无法导入", "剪贴板中没有可识别的 NC 文件或 NC 程序文本。")
+            ApplicationDialog(
+                "无法导入",
+                "剪贴板中没有可识别的 NC 文件或 NC 程序文本。",
+                kind="warning",
+                parent=self,
+            ).exec()
             return
         try:
             self._save_pasted_source(text)
         except Exception as exc:
-            QMessageBox.critical(self, "无法导入 NC 程序", str(exc))
+            ErrorDialog(
+                "无法导入 NC 程序",
+                "无法保存剪贴板中的 NC 程序。请检查目标文件夹后再试。",
+                log_exception(f"无法导入 NC 程序\n{exc}"),
+                technical_details=str(exc),
+                parent=self,
+            ).exec()
 
     def _save_pasted_source(self, text: str) -> None:
         """Ask for a real source location when clipboard text has no path.
@@ -837,7 +852,13 @@ class NcConversionDialog(QDialog):
             try:
                 self._append_source(path)
             except Exception as exc:
-                QMessageBox.critical(self, "无法读取 NC 程序", f"{path.name}\n\n{exc}")
+                ErrorDialog(
+                    "无法读取 NC 程序",
+                    f"无法读取“{path.name}”。请确认文件没有被占用且仍然存在。",
+                    log_exception(f"无法读取 NC 程序\n{path.name}\n{exc}"),
+                    technical_details=f"{path.name}\n\n{exc}",
+                    parent=self,
+                ).exec()
         if skipped:
             self.summary.setText("部分文件未导入：该快捷方式原本只处理 .NC 文件。")
 
@@ -884,7 +905,12 @@ class NcConversionDialog(QDialog):
     def apply_conversion(self) -> None:
         self._store_editor_text()
         if not self._sources:
-            QMessageBox.information(self, "请先导入", "请拖入、选择或粘贴至少一个 NC 程序。")
+            ApplicationDialog(
+                "请先导入",
+                "请拖入、选择或粘贴至少一个 NC 程序。",
+                kind="warning",
+                parent=self,
+            ).exec()
             return
         converted: list[ConversionResult] = []
         failures: list[str] = []
@@ -905,15 +931,17 @@ class NcConversionDialog(QDialog):
                 failures.append(f"{source.source_path.name}：{exc}")
         if not converted:
             detail = "\n".join(failures) or "没有符合当前快捷方式规则的 NC 文件。"
-            QMessageBox.warning(self, "没有可处理的文件", detail)
+            ApplicationDialog("没有可处理的文件", detail, kind="warning", parent=self).exec()
             return
         self.converted_files = converted
         if failures:
-            QMessageBox.warning(
-                self,
+            ApplicationDialog(
                 "部分程序修改失败",
-                "以下程序未能完成修改；已成功修改的程序会继续自动填写到程序单：\n\n" + "\n".join(failures),
-            )
+                "以下程序未能完成修改；已成功修改的程序会继续自动填写到程序单。",
+                kind="warning",
+                details="\n".join(failures),
+                parent=self,
+            ).exec()
         self.accept()
 
 
@@ -946,7 +974,13 @@ class NcSourceEditorDialog(QDialog):
         try:
             self.source_path.write_bytes(encode_windows_default(self.editor.toPlainText()))
         except Exception as exc:
-            QMessageBox.critical(self, "无法保存 NC 程序", str(exc))
+            ErrorDialog(
+                "无法保存 NC 程序",
+                "无法写入 NC 程序。请检查文件是否被其他软件占用。",
+                log_exception(f"无法保存 NC 程序\n{exc}"),
+                technical_details=str(exc),
+                parent=self,
+            ).exec()
             return
         self.accept()
 
@@ -2066,6 +2100,7 @@ class SettingsDialog(QDialog):
         selection_color: str,
         appearance_mode: str = "light",
         window_color: str = DEFAULT_WINDOW_COLOR,
+        show_repeat_error_nudge: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2075,6 +2110,8 @@ class SettingsDialog(QDialog):
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
         self.save_reminder.setChecked(show_save_reminder)
+        self.repeat_error_nudge = QCheckBox("同一错误连续两次时显示趣味拍拍提醒")
+        self.repeat_error_nudge.setChecked(show_repeat_error_nudge)
         self.automatic_update_check = QCheckBox("启动后及后台自动检查更新")
         self.automatic_update_check.setChecked(automatic_update_check)
         self.confirm_before_clear = QCheckBox("清空已导入内容前要求确认")
@@ -2209,6 +2246,7 @@ class SettingsDialog(QDialog):
         reminders = QWidget()
         reminder_layout = QVBoxLayout(reminders)
         reminder_layout.addWidget(self.save_reminder)
+        reminder_layout.addWidget(self.repeat_error_nudge)
         reminder_note = QLabel("关闭后，保存成功只在窗口底部显示状态，不再弹出提示。随时可在这里重新打开。")
         reminder_note.setWordWrap(True)
         reminder_layout.addWidget(reminder_note)
@@ -2562,7 +2600,12 @@ class ProgramSheetPrintPreviewDialog(QDialog):
             return
         printer = dialog.build_printer()
         if printer is None:
-            QMessageBox.warning(self, "未找到打印机", "Windows 当前没有可用打印机，请先安装或连接打印机。")
+            ApplicationDialog(
+                "未找到打印机",
+                "Windows 当前没有可用打印机，请先安装或连接打印机。",
+                kind="warning",
+                parent=self,
+            ).exec()
             return
         self._printer.setPageOrientation(printer.pageLayout().orientation())
         self._save_preferences()
@@ -2608,6 +2651,9 @@ class MainWindow(QMainWindow):
         self._update_worker: Worker | None = None
         self._print_printer: QPrinter | None = None
         self._awaiting_print_area_selection = False
+        self._last_error_key = ""
+        self._last_error_at = 0.0
+        self._consecutive_error_count = 0
         # An update installer must be allowed to close the running process
         # without the ordinary user-facing close/minimize question.
         self._exiting_for_update = False
@@ -3783,18 +3829,19 @@ class MainWindow(QMainWindow):
         displayed = "\n".join(f"• {label}" for label in preview_labels)
         if len(labels) > len(preview_labels):
             displayed += f"\n• ……其余 {len(labels) - len(preview_labels)} 个请点“显示详细信息”查看"
-        box = QMessageBox(self)
-        box.setWindowTitle("模板容量已满")
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(f"模板最多填写 {LAYOUT.capacity} 个程序行。以下 {len(labels)} 个程序行本次未导入：")
-        box.setInformativeText(
+        ApplicationDialog(
+            "模板容量已满",
+            f"模板最多填写 {LAYOUT.capacity} 个程序行；以下 {len(labels)} 个程序行本次未导入。",
+            kind="warning",
+            details=(
             f"{displayed}\n\n"
             "请先点击“完成并保存”保存当前已整理的程序单，然后点击“清空”清除当前导入记录，"
             "再重新导入上述未导入的程序。\n\n"
-            "“清空”只清除软件当前列表，不会删除任何原始 NC 文件。"
-        )
-        box.setDetailedText("未导入的程序行：\n" + "\n".join(labels))
-        box.exec()
+            "“清空”只清除软件当前列表，不会删除任何原始 NC 文件。\n\n"
+            "未导入的程序行：\n" + "\n".join(labels)
+            ),
+            parent=self,
+        ).exec()
 
     def reparse(self) -> None:
         if not self._has_imported_records():
@@ -3846,12 +3893,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("已按原始 NC 文件重新解析。", 3500)
 
     def clear_all(self) -> None:
-        if (
-            self._has_imported_records()
-            and self.settings.get("confirm_before_clear", True)
-            and QMessageBox.question(self, "清空", "清空已导入文件及当前预览中的手动修改？") != QMessageBox.StandardButton.Yes
-        ):
-            return
+        if self._has_imported_records() and self.settings.get("confirm_before_clear", True):
+            dialog = ApplicationDialog(
+                "清空当前内容？",
+                "这会移除当前导入的 NC 文件、解析结果、表格手动编辑和图片。原始 NC 文件不会被删除。",
+                kind="warning",
+                buttons=(("取消", "cancel"), ("清空", "clear")),
+                parent=self,
+            )
+            dialog.exec()
+            if dialog.choice != "clear":
+                return
         self.records.clear()
         self.row_markers.clear()
         self.conversion_tags.clear()
@@ -4012,12 +4064,14 @@ class MainWindow(QMainWindow):
             str(self.settings.get("selection_color", DEFAULT_SELECTION_COLOR)),
             str(self.settings.get("appearance_mode", "light")),
             str(self.settings.get("window_color", DEFAULT_WINDOW_COLOR)),
+            bool(self.settings.get("show_repeat_error_nudge", True)),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["update_repository"] = dialog.repository.text().strip()
             previous_reminder = bool(self.settings.get("show_save_success_message", True))
             self.settings["show_save_success_message"] = dialog.save_reminder.isChecked()
+            self.settings["show_repeat_error_nudge"] = dialog.repeat_error_nudge.isChecked()
             self.settings["automatic_update_check"] = dialog.automatic_update_check.isChecked()
             self.settings["confirm_before_clear"] = dialog.confirm_before_clear.isChecked()
             self.settings["confirm_before_save"] = dialog.confirm_before_save.isChecked()
@@ -4082,24 +4136,37 @@ class MainWindow(QMainWindow):
             if not silent:
                 self.statusBar().showMessage("已是最新版本。", 3500)
             return
-        box = QMessageBox(self)
-        box.setWindowTitle("发现新版本")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"发现 v{update.version}，当前为 v{__version__}。")
-        box.setInformativeText("更新只替换程序安装文件；用户模板、配置和个人数据均保存在 AppData，不会被覆盖。")
-        install = box.addButton("下载并安装", QMessageBox.ButtonRole.AcceptRole)
-        release = box.addButton("查看 Release", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is release:
+        dialog = ApplicationDialog(
+            "发现新版本",
+            f"发现 v{update.version}，当前为 v{__version__}。",
+            kind="info",
+            details="更新只替换程序安装文件；用户模板、配置和个人数据均保存在 AppData，不会被覆盖。",
+            buttons=(("下载并安装", "install"), ("查看 Release", "release"), ("稍后", "later")),
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.choice == "release":
             open_release_page(update)
-        elif box.clickedButton() is install:
+        elif dialog.choice == "install":
             self._download_update(update)
 
     def _on_update_check_failed(self, error: str, silent: bool) -> None:
         self._update_worker = None
         if not silent:
-            self.show_error("检查更新失败", error)
+            title = "检查更新失败"
+            dialog = ErrorDialog(
+                title,
+                self._friendly_error_message(title, error),
+                log_exception(f"{title}\n{error}"),
+                technical_details=error,
+                repeated_count=self._record_error_occurrence(title),
+                show_repeat_nudge=bool(self.settings.get("show_repeat_error_nudge", True)),
+                buttons=(("重试", "retry"), ("关闭", "close")),
+                parent=self,
+            )
+            dialog.exec()
+            if dialog.choice == "retry":
+                QTimer.singleShot(0, lambda: self.check_updates(silent=False))
 
     def _download_update(self, update: UpdateInfo) -> None:
         self.statusBar().showMessage("正在下载并校验更新安装包…")
@@ -4114,7 +4181,12 @@ class MainWindow(QMainWindow):
         self._update_worker = None
         try:
             start_installer_after_exit(installer)
-            QMessageBox.information(self, "开始升级", "已下载并校验更新。程序关闭后将自动安装新版。")
+            ApplicationDialog(
+                "开始升级",
+                "已下载并校验更新。关闭软件后将自动安装新版。",
+                kind="info",
+                parent=self,
+            ).exec()
             self._exiting_for_update = True
             QApplication.instance().quit()
         except Exception as exc:
@@ -4176,7 +4248,15 @@ class MainWindow(QMainWindow):
         if uncertain:
             text = "以下程序仍有“未识别”项：\n" + "、".join(uncertain)
             text += "\n\n可在左侧解析表或右侧 Excel 预览中手动修改，仍要保存吗？"
-            return QMessageBox.question(self, "需要确认", text) == QMessageBox.StandardButton.Yes
+            dialog = ApplicationDialog(
+                "需要确认",
+                text,
+                kind="warning",
+                buttons=(("返回修改", "cancel"), ("仍然保存", "save")),
+                parent=self,
+            )
+            dialog.exec()
+            return dialog.choice == "save"
         return True
 
     def save_output(self) -> None:
@@ -4196,8 +4276,15 @@ class MainWindow(QMainWindow):
                 document_name=self.manual_cells.get(LAYOUT.output_name_cell, ""),
             )
             if self.settings.get("confirm_before_save", False):
-                answer = QMessageBox.question(self, "确认保存", f"确认保存程序单到：\n{target}？")
-                if answer != QMessageBox.StandardButton.Yes:
+                dialog = ApplicationDialog(
+                    "确认保存",
+                    f"确认将程序单保存到：\n{target}？",
+                    kind="question",
+                    buttons=(("取消", "cancel"), ("确认保存", "save")),
+                    parent=self,
+                )
+                dialog.exec()
+                if dialog.choice != "save":
                     return
             export_workbook(
                 self.template_path,
@@ -4224,23 +4311,22 @@ class MainWindow(QMainWindow):
             return
         self.settings["save_notice_version"] = __version__
         save_settings(self.settings)
-        box = QMessageBox(self)
-        box.setWindowTitle("新版首次保存完成")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"v{__version__} 已完成第一次程序单保存")
-        box.setInformativeText(f"{target}\n\n之后保存将不再弹窗，只会在底部显示完成信息。")
-        never_remind = QCheckBox("永不提醒")
-        box.setCheckBox(never_remind)
-        open_file = box.addButton("打开文件", QMessageBox.ButtonRole.AcceptRole)
-        open_folder = box.addButton("打开文件夹", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if never_remind.isChecked():
+        dialog = ApplicationDialog(
+            "新版首次保存完成",
+            f"v{__version__} 已完成第一次程序单保存。\n已保存到：{target}",
+            kind="info",
+            details="之后保存将不再弹窗，只会在底部显示完成信息。",
+            buttons=(("打开文件", "file"), ("打开文件夹", "folder"), ("关闭", "close")),
+            checkbox_text="永不提醒",
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.checkbox_checked:
             self.settings["show_save_success_message"] = False
             save_settings(self.settings)
-        if box.clickedButton() is open_file:
+        if dialog.choice == "file":
             os.startfile(target)  # type: ignore[attr-defined]
-        elif box.clickedButton() is open_folder:
+        elif dialog.choice == "folder":
             os.startfile(target.parent)  # type: ignore[attr-defined]
 
     def closeEvent(self, event: Any) -> None:
@@ -4270,24 +4356,24 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
-        box = QMessageBox(self)
-        box.setWindowTitle("关闭 CNC 智能程序单")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText("要缩小到电脑右下角隐藏图标区，还是直接退出软件？")
-        never_remind = QCheckBox("永不提醒")
-        box.setCheckBox(never_remind)
-        minimize = box.addButton("缩小到右下角隐藏图标区", QMessageBox.ButtonRole.AcceptRole)
-        exit_program = box.addButton("直接退出", QMessageBox.ButtonRole.DestructiveRole)
-        box.exec()
-        selected = box.clickedButton()
-        if selected is minimize:
-            if never_remind.isChecked():
+        dialog = ApplicationDialog(
+            "关闭 CNC 智能程序单",
+            "要缩小到电脑右下角隐藏图标区，还是直接退出软件？",
+            kind="question",
+            details="缩小后软件会继续在后台运行，可从 Windows 右下角隐藏图标区重新打开。",
+            buttons=(("缩小到右下角隐藏图标区", "minimize"), ("直接退出", "exit"), ("取消", "cancel")),
+            checkbox_text="以后按此选择，不再询问",
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.choice == "minimize":
+            if dialog.checkbox_checked:
                 self.settings["close_window_behavior"] = "minimize"
                 save_settings(self.settings)
             event.ignore()
             self._hide_to_tray()
-        elif selected is exit_program:
-            if never_remind.isChecked():
+        elif dialog.choice == "exit":
+            if dialog.checkbox_checked:
                 self.settings["close_window_behavior"] = "exit"
                 save_settings(self.settings)
             event.accept()
@@ -4295,8 +4381,49 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def show_error(self, title: str, details: str) -> None:
+        """Show a clear, non-technical error first and preserve diagnostics.
+
+        Some sources (Windows, GitHub and Python libraries) return long
+        English exception strings.  Operators see a practical next step, while
+        support can still expand the exact message and log path when needed.
+        """
+
         log_path = log_exception(f"{title}\n{details}")
-        QMessageBox.critical(self, title, f"{details}\n\n详细日志：{log_path}")
+        repeated_count = self._record_error_occurrence(title)
+        message = self._friendly_error_message(title, details)
+        technical_details = "" if message == details.strip() else details
+        ErrorDialog(
+            title,
+            message,
+            log_path,
+            technical_details=technical_details,
+            repeated_count=repeated_count,
+            show_repeat_nudge=bool(self.settings.get("show_repeat_error_nudge", True)),
+            parent=self,
+        ).exec()
+
+    @staticmethod
+    def _friendly_error_message(title: str, details: str) -> str:
+        raw = details.strip()
+        if title == "检查更新失败":
+            return "暂时无法检查更新。软件仍可正常使用；请检查网络后重试。"
+        technical_markers = ("HTTP Error", "<urlopen error", "Traceback", "[WinError", "CERTIFICATE_", "ModuleNotFoundError")
+        if raw and len(raw) <= 180 and not any(marker in raw for marker in technical_markers):
+            return raw
+        return f"{title}，本次操作没有完成。请检查输入或操作条件后再试一次。"
+
+    def _record_error_occurrence(self, title: str, now: float | None = None) -> int:
+        """Return the consecutive count for a repeated user operation error."""
+
+        current_time = time.monotonic() if now is None else now
+        key = " ".join(title.split())
+        if key == self._last_error_key and current_time - self._last_error_at <= REPEATED_ERROR_WINDOW_SECONDS:
+            self._consecutive_error_count += 1
+        else:
+            self._consecutive_error_count = 1
+        self._last_error_key = key
+        self._last_error_at = current_time
+        return self._consecutive_error_count
 
 
 def run() -> int:
@@ -4322,7 +4449,13 @@ def _exception_hook(exc_type: type[BaseException], value: BaseException, trace: 
     details = "".join(traceback.format_exception(exc_type, value, trace))
     log_path = log_exception(details)
     if QApplication.instance() is not None:
-        QMessageBox.critical(None, "程序发生错误", f"程序没有正常完成操作。\n\n{value}\n\n详细日志：{log_path}")
+        ErrorDialog(
+            "程序发生错误",
+            "程序没有正常完成操作。已保留错误日志，可关闭此提示后继续使用软件。",
+            log_path,
+            technical_details=str(value),
+            parent=QApplication.activeWindow(),
+        ).exec()
     else:
         sys.stderr.write(f"程序发生错误：{value}\n详细日志：{log_path}\n")
 
