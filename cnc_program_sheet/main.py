@@ -82,7 +82,7 @@ from .update_service import (
     open_release_page,
     start_installer_after_exit,
 )
-from .version import APP_ICON_FILE, APP_NAME, APP_USER_MODEL_ID, __version__
+from .version import APP_ICON_FILE, APP_NAME, APP_USER_MODEL_ID, RELEASE_NOTES, __version__
 
 
 RESULT_COLUMNS: list[tuple[str, str]] = [
@@ -2941,6 +2941,31 @@ class MainWindow(QMainWindow):
             candidate = default_user_template()
         self.load_template(candidate)
 
+    def show_release_notes_if_needed(self) -> None:
+        """Show this packaged version's changes exactly once for each user.
+
+        Settings live under LocalAppData and survive an in-place installer
+        update.  A newly installed user has no recorded version and therefore
+        sees the same concise summary on their first start.
+        """
+
+        if str(self.settings.get("release_notes_seen_version", "")) == __version__:
+            return
+        notes = RELEASE_NOTES or ("本次版本包含稳定性和体验优化。",)
+        content = "\n".join(f"• {note}" for note in notes)
+        dialog = ApplicationDialog(
+            f"已更新至 v{__version__}",
+            f"本次更新内容：\n{content}\n\n此说明只会在首次打开本版本时显示一次。",
+            kind="info",
+            buttons=(("知道了", "close"),),
+            parent=self,
+        )
+        dialog.exec()
+        # Closing the dialog with X also counts as having seen it. This keeps
+        # the promise that a given version never interrupts startup twice.
+        self.settings["release_notes_seen_version"] = __version__
+        save_settings(self.settings)
+
     def load_template(self, path: Path) -> None:
         try:
             verify_template(path)
@@ -4524,6 +4549,9 @@ def run() -> int:
         app.setWindowIcon(icon)
     window = MainWindow()
     window.show()
+    # Wait until the main window is visible so the update summary is a normal
+    # child dialog rather than a startup flash behind the application window.
+    QTimer.singleShot(260, window.show_release_notes_if_needed)
     return app.exec()
 
 
