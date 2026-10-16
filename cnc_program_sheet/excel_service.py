@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Mapping, Sequence
+from uuid import uuid4
 
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -100,6 +101,58 @@ def verify_template(path: str | Path) -> None:
         workbook.close()
 
 
+def save_template_column_widths(template_path: str | Path, pixel_widths: Mapping[str, int]) -> None:
+    """Persist only the visible spreadsheet column widths into a template.
+
+    The live Qt table uses pixels while Excel uses its own character-width
+    unit.  ``ExcelPreview.load_template`` converts an Excel width with
+    ``width * 7 + 10``; use the exact inverse here so a Ctrl+S layout save
+    opens at the same size after the application is restarted.
+
+    This intentionally changes *only* column dimensions.  It never copies
+    imported NC data, hand-entered cell values, pictures or parsed results
+    back into the template.  Normal program-sheet export remains a separate,
+    non-overwriting operation.
+    """
+
+    template = Path(template_path)
+    verify_template(template)
+    if not pixel_widths:
+        raise TemplateError("没有可保存的表格列宽")
+
+    workbook = load_workbook(template, read_only=False, data_only=False, keep_links=True)
+    temporary = template.with_name(f".{template.stem}.layout-{uuid4().hex}{template.suffix}")
+    try:
+        sheet = workbook[LAYOUT.sheet_name]
+        for column, pixels in pixel_widths.items():
+            if not re.fullmatch(r"[A-Z]{1,3}", str(column)):
+                raise TemplateError(f"无效的列名：{column}")
+            if isinstance(pixels, bool) or not isinstance(pixels, int) or pixels < 44:
+                raise TemplateError(f"无效的列宽：{column}={pixels}")
+            # A tiny positive epsilon prevents binary floating-point rounding
+            # from reconstructing one pixel smaller after ``int(width * 7 +
+            # 10)`` in the preview loader.
+            sheet.column_dimensions[str(column)].width = round((pixels - 10 + 0.01) / 7, 6)
+        workbook.save(temporary)
+    except PermissionError as exc:
+        raise TemplateError("无法保存模板列宽：模板可能正在被 Excel 或 WPS 占用，请关闭后重试。") from exc
+    except OSError as exc:
+        raise TemplateError(f"无法保存模板列宽：{exc}") from exc
+    finally:
+        workbook.close()
+
+    try:
+        # Replace only after the complete workbook has been written, so an
+        # interrupted save cannot leave a half-written template behind.
+        temporary.replace(template)
+    except PermissionError as exc:
+        raise TemplateError("无法替换模板文件：模板可能正在被 Excel 或 WPS 占用，请关闭后重试。") from exc
+    except OSError as exc:
+        raise TemplateError(f"无法替换模板文件：{exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def program_sheet_date(value: date | None = None) -> str:
     """Return the date in the exact display convention used by the template."""
 
@@ -111,8 +164,9 @@ def automatic_cells(records: Sequence[ProgramRecord], generated_on: date | None 
 
     if len(records) > LAYOUT.capacity:
         raise TemplateError(f"一次最多导入 {LAYOUT.capacity} 个 NC 文件；当前为 {len(records)} 个。")
-    # J3 is deliberately refreshed for previews and export; the template file
-    # itself is never saved or changed.
+    # J3 is deliberately refreshed for previews and export. Layout saving may
+    # update column dimensions through an explicit Ctrl+S, but never changes
+    # template cell contents such as this generated date.
     values: dict[str, str] = {LAYOUT.date_cell: program_sheet_date(generated_on)}
     for index, record in enumerate(records):
         for field, value in LAYOUT.record_values(record).items():

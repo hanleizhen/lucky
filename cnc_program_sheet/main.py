@@ -14,7 +14,7 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRectF, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -67,6 +67,7 @@ from .excel_service import (
     cleared_program_cells,
     export_workbook,
     output_filename,
+    save_template_column_widths,
     verify_template,
 )
 from .error_dialog import ApplicationDialog, ErrorDialog
@@ -1218,6 +1219,7 @@ class ExcelPreview(QTableWidget):
     print_area_requested = Signal(int, int, int, int)
     clear_print_area_requested = Signal()
     print_area_selection_finished = Signal(int, int, int, int)
+    column_widths_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1232,6 +1234,7 @@ class ExcelPreview(QTableWidget):
         self._redo_stack: list[list[tuple[str, str, str]]] = []
         self._known_values: dict[str, str] = {}
         self._history_applying = False
+        self._column_widths_dirty = False
         # Keep enough pointer state to distinguish a normal click from a
         # drag-selection.  A click on an empty grid cell after either one cell
         # or a range has been selected dismisses the visible focus completely.
@@ -1273,8 +1276,35 @@ class ExcelPreview(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_program_row_menu)
         self.itemChanged.connect(self._on_item_changed)
+        self.horizontalHeader().sectionResized.connect(self._on_column_resized)
         self.horizontalScrollBar().valueChanged.connect(lambda _: self._reposition_image_overlays())
         self.verticalScrollBar().valueChanged.connect(lambda _: self._reposition_image_overlays())
+
+    def _on_column_resized(self, _column: int, _old_width: int, _new_width: int) -> None:
+        """Track a user drag without mistaking template loading for an edit."""
+
+        if self._loading:
+            return
+        self._column_widths_dirty = True
+        # Floating screenshots are anchored to worksheet coordinates, so a
+        # column resize must redraw them at their new on-sheet position.
+        self._reposition_image_overlays()
+        self.column_widths_changed.emit()
+
+    def column_pixel_widths(self) -> dict[str, int]:
+        """Return the current visible widths using Excel column letters."""
+
+        return {
+            self._column_name(column + 1): self.columnWidth(column)
+            for column in range(self.columnCount())
+        }
+
+    def mark_column_widths_saved(self) -> None:
+        self._column_widths_dirty = False
+
+    @property
+    def column_widths_dirty(self) -> bool:
+        return self._column_widths_dirty
 
     @staticmethod
     def _is_program_table_row(row: int) -> bool:
@@ -1899,6 +1929,7 @@ class ExcelPreview(QTableWidget):
         finally:
             self._loading = False
             workbook.close()
+        self.mark_column_widths_saved()
         self._sync_known_values()
         self.clear_edit_history()
         QTimer.singleShot(0, self._reposition_image_overlays)
@@ -2661,6 +2692,7 @@ class MainWindow(QMainWindow):
         self._update_worker: Worker | None = None
         self._print_printer: QPrinter | None = None
         self._awaiting_print_area_selection = False
+        self._template_layout_dirty = False
         self._last_error_key = ""
         self._last_error_at = 0.0
         self._consecutive_error_count = 0
@@ -2865,6 +2897,14 @@ class MainWindow(QMainWindow):
         self.preview.print_area_requested.connect(self.set_print_area)
         self.preview.clear_print_area_requested.connect(self.clear_print_area)
         self.preview.print_area_selection_finished.connect(self._finish_print_area_selection)
+        self.preview.column_widths_changed.connect(self._on_preview_column_widths_changed)
+        self.preview.horizontalHeader().setToolTip("拖动列标题之间的分隔线调整宽度；按 Ctrl+S 保存到当前模板")
+        # Saving a layout is deliberately separate from “完成并保存”：the
+        # latter creates a new program sheet, while Ctrl+S writes only the
+        # operator's column-width preference into the selected template.
+        self._save_template_layout_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_template_layout_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._save_template_layout_shortcut.activated.connect(self.save_template_layout)
         # Every visible work area accepts an NC drop.  Some Qt item views own
         # their viewport and otherwise swallow the drag before it reaches the
         # main window, which made drops appear to do nothing after UI changes.
@@ -2906,6 +2946,7 @@ class MainWindow(QMainWindow):
             verify_template(path)
             self.template_path = path
             self.preview.load_template(path)
+            self._template_layout_dirty = False
             self.image_placements.clear()
             self.preview.refresh_floating_images(self.image_placements)
             self._program_area_reset = False
@@ -2916,7 +2957,7 @@ class MainWindow(QMainWindow):
             self.template_label.setText(f"Excel 程序单预览：{path.name}")
             self.settings["template_path"] = str(path)
             save_settings(self.settings)
-            self.statusBar().showMessage("模板已加载；原始模板只读使用，不会被覆盖。", 5000)
+            self.statusBar().showMessage("模板已加载；正常导出不会覆盖模板。调整列宽后按 Ctrl+S 可保存布局。", 5500)
         except Exception as exc:
             self.show_error("无法打开模板", str(exc))
 
@@ -2924,6 +2965,29 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(self, "选择 CNC 程序单模板", str(self.template_path or Path.home()), "Excel 文件 (*.xlsx)")
         if filename:
             self.load_template(Path(filename))
+
+    def _on_preview_column_widths_changed(self) -> None:
+        """Tell the operator how to make a header-drag survive a restart."""
+
+        self._template_layout_dirty = True
+        self.statusBar().showMessage("列宽已调整；按 Ctrl+S 保存到当前模板，重启后仍会保持。", 5000)
+
+    def save_template_layout(self) -> None:
+        """Persist the current header widths without writing program data."""
+
+        if self.template_path is None:
+            return
+        if not self._template_layout_dirty and not self.preview.column_widths_dirty:
+            self.statusBar().showMessage("当前列宽没有新的调整。", 2500)
+            return
+        try:
+            save_template_column_widths(self.template_path, self.preview.column_pixel_widths())
+        except Exception as exc:
+            self.show_error("无法保存模板列宽", str(exc))
+            return
+        self.preview.mark_column_widths_saved()
+        self._template_layout_dirty = False
+        self.statusBar().showMessage("列宽已保存到当前模板；以后重新打开、重启和导出都会保持。", 5000)
 
     def insert_image(self) -> None:
         """Add a file image as a movable object at the selected Excel cell."""
@@ -3381,14 +3445,22 @@ class MainWindow(QMainWindow):
                     self.add_nc_files(paths)
                 event.acceptProposedAction()
                 return True
-        if event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
-            if self._clipboard_contains_nc_input():
+        if event.type() == QEvent.Type.KeyPress:
+            if event.matches(QKeySequence.StandardKey.Save):
+                self.save_template_layout()
+                event.accept()
+                return True
+            if event.matches(QKeySequence.StandardKey.Paste) and self._clipboard_contains_nc_input():
                 self.paste_nc_from_clipboard()
                 event.accept()
                 return True
         return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event: Any) -> None:
+        if event.matches(QKeySequence.StandardKey.Save):
+            self.save_template_layout()
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.Paste) and self._clipboard_contains_nc_input():
             self.paste_nc_from_clipboard()
             event.accept()
