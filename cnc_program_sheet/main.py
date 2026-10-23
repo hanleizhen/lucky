@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import ctypes
 import os
 import re
@@ -4667,9 +4668,31 @@ class MainWindow(QMainWindow):
         return self._consecutive_error_count
 
 
+def parse_launch_arguments(arguments: list[str] | None = None) -> list[Path]:
+    """Return NC files passed by a Mastercam add-in or a shell shortcut.
+
+    The option is intentionally just a transport bridge: Mastercam or its
+    post-processor supplies finished NC files, while the existing application
+    remains responsible for parsing and preparing the program sheet.
+    """
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--import-nc",
+        action="append",
+        nargs="+",
+        metavar="PATH",
+        help="Import one or more posted NC files at startup (Mastercam bridge).",
+    )
+    parsed, _unknown = parser.parse_known_args(sys.argv[1:] if arguments is None else arguments)
+    return [Path(path) for group in (parsed.import_nc or []) for path in group]
+
+
 def run() -> int:
     _set_windows_app_user_model_id()
-    app = QApplication(sys.argv)
+    import_paths = parse_launch_arguments()
+    # Keep integration arguments away from Qt's own option parser.
+    app = QApplication([sys.argv[0]])
     appearance_settings = load_settings()
     apply_application_theme(
         app,
@@ -4683,6 +4706,8 @@ def run() -> int:
         app.setWindowIcon(icon)
     window = MainWindow()
     window.show()
+    if import_paths:
+        QTimer.singleShot(0, lambda: window.add_nc_files(import_paths))
     # Wait until the main window is visible so the update summary is a normal
     # child dialog rather than a startup flash behind the application window.
     QTimer.singleShot(260, window.show_release_notes_if_needed)
