@@ -93,6 +93,7 @@ CHAMFER_RE = re.compile(rf"(?<![A-Z0-9])C\s*{NUMBER}\s*(?:°|DEG(?:REE)?S?|度)"
 MOTION_RE = re.compile(r"(?:G0?[0-3](?!\d)|G8[1-9](?!\d)|[XYZ]\s*[+-]?(?:\d|\.))", re.I)
 COORDINATE_RE = re.compile(r"\b[XYZF]\s*[+-]?(?:\d|\.)", re.I)
 OFFSET_RE = re.compile(r"\bG4[12]\s*D\s*\d", re.I)
+SPINDLE_SPEED_RE = re.compile(rf"(?<![A-Z])S\s*(?P<speed>{NUMBER_VALUE})(?![0-9.])", re.I)
 
 
 def _read_nc(path: Path) -> str:
@@ -261,6 +262,59 @@ def _find_tool_number(lines: list[str]) -> tuple[str | None, bool]:
     return (values[0], False) if len(values) == 1 else (None, len(values) > 1)
 
 
+def _find_spindle_speeds(lines: list[str], fallback_tool: str) -> tuple[str, ...]:
+    """Collect positive executable S words for the active tool only.
+
+    Parenthesised and semicolon comments are removed before scanning. An M6
+    establishes the active controller tool; for older single-tool posts that
+    omit M6, the parser's uniquely identified tool number is used as fallback.
+    """
+
+    active_tool = ""
+    speeds: list[str] = []
+    for line in lines:
+        tool_change = TOOL_CHANGE_RE.search(line)
+        if tool_change:
+            active_tool = f"T{int(tool_change.group('tool_number'))}"
+        for match in SPINDLE_SPEED_RE.finditer(line):
+            try:
+                speed = Decimal(match.group("speed"))
+            except InvalidOperation:
+                continue
+            if speed <= 0 or not (active_tool or fallback_tool):
+                continue
+            speeds.append(_normalise_number(match.group("speed")))
+    return tuple(_unique_values(speeds))
+
+
+def _flag_conflicting_spindle_speeds(records: list[ProgramRecord]) -> None:
+    """Flag a tool only when its speed differs within the same NC source.
+
+    Controller tool numbers are local to a program and are commonly reused
+    across unrelated NC files, so comparisons intentionally never cross files.
+    """
+
+    grouped: dict[tuple[Path, str], list[ProgramRecord]] = {}
+    for record in records:
+        if record.tool_number == UNRECOGNIZED:
+            continue
+        grouped.setdefault((record.source_path.resolve(), record.tool_number), []).append(record)
+
+    for (_, tool_number), tool_records in grouped.items():
+        all_speeds = _unique_values(
+            [speed for record in tool_records for speed in record.spindle_speeds]
+        )
+        if len(all_speeds) <= 1:
+            continue
+        warning = f"同一 NC 程序中的 {tool_number} 出现多种转速：" + " / ".join(
+            f"S{speed}" for speed in all_speeds
+        ) + " r/min"
+        for record in tool_records:
+            if record.spindle_speeds:
+                record.spindle_speed_warning = warning
+                record.warnings.append(warning)
+
+
 def _has_contour_motion(executable_lines: list[str]) -> bool:
     """Identify modal linear/circular contour moves without accepting cycles.
 
@@ -335,6 +389,8 @@ def parse_text(text: str, filename: str, source_path: Path | None = None) -> Pro
         record.warnings.append("发现多个刀具号，未自动填写 T")
     elif not tool_number:
         record.warnings.append("未找到明确刀具号")
+    fallback_tool = record.tool_number if not tool_number_ambiguous else ""
+    record.spindle_speeds = _find_spindle_speeds(executable_lines, fallback_tool)
 
     t_shape, t_shape_ambiguous = _find_t_shape_tool(evidence_lines)
     t_style, t_style_ambiguous = _find_t_style_tool(evidence_lines)
@@ -443,7 +499,9 @@ def parse_records_text(text: str, filename: str, source_path: Path | None = None
     if len(changes) <= 1:
         record = parse_text(text, filename, nc_path)
         record.source_tool_index = 0
-        return [record]
+        records = [record]
+        _flag_conflicting_spindle_speeds(records)
+        return records
 
     descriptions: dict[str, str] = {}
     for line in lines:
@@ -464,6 +522,7 @@ def parse_records_text(text: str, filename: str, source_path: Path | None = None
         if record.tool_number == UNRECOGNIZED:
             record.tool_number = f"T{normalised_number}"
         records.append(record)
+    _flag_conflicting_spindle_speeds(records)
     return records
 
 

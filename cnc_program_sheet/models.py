@@ -29,6 +29,10 @@ class ProgramRecord:
     machining_data: str = UNRECOGNIZED
     depth: str = UNRECOGNIZED
     warnings: list[str] = field(default_factory=list)
+    # Spindle S words attributed to this controller tool within the source
+    # program. Kept as parse metadata; the supplied worksheet has no RPM field.
+    spindle_speeds: tuple[str, ...] = ()
+    spindle_speed_warning: str = ""
 
     @property
     def has_unrecognized_values(self) -> bool:

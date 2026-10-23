@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.styles import PatternFill
 from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
@@ -251,6 +252,7 @@ def export_workbook(
     cell_values: Mapping[str, str],
     images: Sequence[ImagePlacement] = (),
     red_text_cells: Sequence[str] = (),
+    red_fill_cells: Sequence[str] = (),
 ) -> None:
     """Create a new workbook. The source template is opened read-only in spirit and never saved."""
 
@@ -275,6 +277,11 @@ def export_workbook(
             font = copy(sheet[cell].font)
             font.color = "FFFF0000"
             sheet[cell].font = font
+        warning_fill = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
+        for cell in red_fill_cells:
+            if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*", cell):
+                raise TemplateError(f"无效的单元格地址：{cell}")
+            sheet[cell].fill = copy(warning_fill)
         for placement in images:
             if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*", placement.anchor):
                 raise TemplateError(f"图片的单元格地址无效：{placement.anchor}")

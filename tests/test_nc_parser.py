@@ -380,3 +380,78 @@ M30
         ("0505.NC", "T2", "D1", "R0.5", "G85", "Z-1.804"),
     ]
     assert [record.source_tool_index for record in records] == [0, 1, 2]
+
+
+def test_spindle_speed_parser_ignores_comments_and_normalizes_s_words() -> None:
+    record = parse_text(
+        """(T1|D4|H1|S9999)
+T1M6
+G0G90S3000.0M3
+S3000
+M30
+""",
+        "O-1.NC",
+    )
+
+    assert record.spindle_speeds == ("3000",)
+    assert record.spindle_speed_warning == ""
+
+
+def test_same_tool_with_two_explicit_speeds_in_one_nc_is_flagged() -> None:
+    records = parse_records_text(
+        """O0001
+(T1|D4|H1)
+T1M6
+G0G90S3000M3
+G1Z-1
+S3500M3
+M30
+""",
+        "O-1.NC",
+    )
+
+    assert len(records) == 1
+    assert records[0].spindle_speeds == ("3000", "3500")
+    assert "T1" in records[0].spindle_speed_warning
+    assert "S3000 / S3500" in records[0].spindle_speed_warning
+    assert records[0].spindle_speed_warning in records[0].status
+
+
+def test_different_tools_in_one_nc_are_not_compared_to_each_other() -> None:
+    records = parse_records_text(
+        """O0001
+(T1|D4|H1)
+(T2|D8|H2)
+T1M6
+S3000M3
+G1Z-1
+T2M6
+S6000M3
+G1Z-2
+M30
+""",
+        "O-1.NC",
+    )
+
+    assert [record.tool_number for record in records] == ["T1", "T2"]
+    assert [record.spindle_speeds for record in records] == [("3000",), ("6000",)]
+    assert all(record.spindle_speed_warning == "" for record in records)
+
+
+def test_repeated_same_tool_sections_with_different_speeds_are_all_flagged() -> None:
+    records = parse_records_text(
+        """O0001
+(T1|D4|H1)
+T1M6
+S3000M3
+G1Z-1
+T1M6
+S3500M3
+G1Z-2
+M30
+""",
+        "O-1.NC",
+    )
+
+    assert len(records) == 2
+    assert all(record.spindle_speed_warning for record in records)

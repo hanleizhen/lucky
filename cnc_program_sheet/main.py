@@ -108,6 +108,7 @@ LEGACY_DEFAULT_DARK_WINDOW_COLOR = "#202936"
 REPEATED_ERROR_WINDOW_SECONDS = 60.0
 CONVERSION_TAG_BACKGROUND = QColor("#DDEBF7")
 CONVERSION_TAG_FOREGROUND = QColor("#1F4E78")
+SPINDLE_WARNING_FILL = QColor("#FFC7CE")
 CONVERSION_TAGS = {
     TransformMode.M06: "M06",
     TransformMode.M304: "M304",
@@ -1244,6 +1245,7 @@ class ExcelPreview(QTableWidget):
         # merged range.  Keep the mapping for every covered preview cell so
         # actions such as Ctrl+V still have a valid Excel anchor.
         self._merged_cell_roots: dict[tuple[int, int], str] = {}
+        self._template_backgrounds: dict[tuple[int, int], QColor] = {}
         # Excel cells with “no fill” are white. Do not inherit a dark Windows
         # palette that would make the template preview black.
         palette = self.palette()
@@ -1872,6 +1874,7 @@ class ExcelPreview(QTableWidget):
             self._theme_colors = self._theme_palette(workbook.loaded_theme)
             self._clear_image_overlays()
             self._merged_cell_roots.clear()
+            self._template_backgrounds.clear()
             self.clear()
             self.setRowCount(sheet.max_row)
             self.setColumnCount(sheet.max_column)
@@ -1892,7 +1895,9 @@ class ExcelPreview(QTableWidget):
                     # A no-fill cell carries ``00000000`` in openpyxl. That
                     # is transparent/default, not a black Excel fill.
                     fill = self._rgb(cell.fill.fgColor) if cell.fill.fill_type else None
-                    item.setBackground(fill or QColor("#FFFFFF"))
+                    background = fill or QColor("#FFFFFF")
+                    item.setBackground(background)
+                    self._template_backgrounds[(cell.row - 1, cell.column - 1)] = QColor(background)
                     font_color = self._rgb(cell.font.color)
                     font = QFont(cell.font.name or "Arial", int(cell.font.sz or 10))
                     font.setBold(bool(cell.font.bold))
@@ -1960,6 +1965,22 @@ class ExcelPreview(QTableWidget):
         item = self.item(row_number - 1, column - 1)
         if item is not None:
             item.setForeground(color)
+
+    def set_cell_background(self, cell: str, color: QColor | None) -> None:
+        """Set a temporary cell fill, or restore the fill loaded from Excel."""
+
+        item = self._item_for_coordinate(cell)
+        if item is None:
+            return
+        if color is not None:
+            item.setBackground(color)
+            return
+        row = int("".join(character for character in cell if character.isdigit())) - 1
+        column_letters = "".join(character for character in cell if character.isalpha())
+        column = 0
+        for character in column_letters:
+            column = column * 26 + ord(character) - 64
+        item.setBackground(self._template_backgrounds.get((row, column - 1), QColor("#FFFFFF")))
 
     def current_coordinate(self) -> str | None:
         """Return the selected Excel coordinate, including merged-cell roots."""
@@ -4118,7 +4139,19 @@ class MainWindow(QMainWindow):
                 continue
             item = QListWidgetItem(record.program_name)
             item.setData(Qt.ItemDataRole.UserRole, str(source))
-            item.setToolTip(f"双击查看和手动修改 NC 程序：\n{source}")
+            source_warnings = list(
+                dict.fromkeys(
+                    current.spindle_speed_warning
+                    for current in self.records
+                    if current is not None
+                    and current.source_path.resolve() == source
+                    and current.spindle_speed_warning
+                )
+            )
+            tooltip = f"双击查看和手动修改 NC 程序：\n{source}"
+            if source_warnings:
+                tooltip += "\n\n⚠ " + "\n⚠ ".join(source_warnings)
+            item.setToolTip(tooltip)
             conversion_tag = self.conversion_tags.get(source)
             if conversion_tag:
                 item.setText(f"{conversion_tag}    {record.program_name}")
@@ -4147,6 +4180,18 @@ class MainWindow(QMainWindow):
         self.manual_cells.update(automatic)
         for cell, value in automatic.items():
             self.preview.set_value(cell, value)
+        for index in range(LAYOUT.capacity):
+            excel_row = LAYOUT.first_program_row + index
+            for column in range(1, self.preview.columnCount() + 1):
+                coordinate = f"{ExcelPreview._column_name(column)}{excel_row}"
+                self.preview.set_cell_background(coordinate, None)
+        for index, record in enumerate(self.records):
+            if record is None or not record.spindle_speed_warning:
+                continue
+            excel_row = LAYOUT.first_program_row + index
+            for column in range(1, self.preview.columnCount() + 1):
+                coordinate = f"{ExcelPreview._column_name(column)}{excel_row}"
+                self.preview.set_cell_background(coordinate, SPINDLE_WARNING_FILL)
         # Normal data returns to the template's black text. Marker cells are
         # reapplied below in red after automatic values have cleared the area.
         for index in range(LAYOUT.capacity):
@@ -4177,6 +4222,9 @@ class MainWindow(QMainWindow):
                 else:
                     value = record.status if field == "status" else str(getattr(record, field))
                 item = QTableWidgetItem(value)
+                if record is not None and record.spindle_speed_warning:
+                    item.setBackground(SPINDLE_WARNING_FILL)
+                    item.setToolTip(record.spindle_speed_warning)
                 if field == "status" or record is None:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if record is not None and record.has_unrecognized_values:
@@ -4479,6 +4527,12 @@ class MainWindow(QMainWindow):
                 self.manual_cells,
                 images=self.image_placements,
                 red_text_cells=[LAYOUT.target_cell("program_name", index) for index in self.row_markers],
+                red_fill_cells=[
+                    f"{ExcelPreview._column_name(column)}{LAYOUT.first_program_row + index}"
+                    for index, record in enumerate(self.records)
+                    if record is not None and record.spindle_speed_warning
+                    for column in range(1, self.preview.columnCount() + 1)
+                ],
             )
             self._show_save_success(target)
             if self.settings.get("open_folder_after_save", False) and sys.platform == "win32":
