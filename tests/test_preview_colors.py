@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QTableWidgetSelectionRange
 
-from cnc_program_sheet.main import ExcelPreview
+from cnc_program_sheet.main import ExcelPreview, MainWindow
 
 
 def test_preview_uses_template_fill_or_white_not_black() -> None:
@@ -76,8 +76,8 @@ def test_preview_single_value_fills_the_selected_rectangle_like_excel() -> None:
     assert app is not None
 
 
-def test_preview_blank_cell_click_dismisses_a_multi_cell_selection() -> None:
-    """A blank-grid click restores the sheet without a residual focus box."""
+def test_preview_first_click_on_blank_cell_selects_that_cell() -> None:
+    """An empty template cell must be selectable on the first click."""
 
     app = QApplication.instance() or QApplication([])
     preview = ExcelPreview()
@@ -94,8 +94,8 @@ def test_preview_blank_cell_click_dismisses_a_multi_cell_selection() -> None:
     assert preview.item(14, 1).text() == ""
     QTest.mouseClick(preview.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, preview.visualRect(target).center())
 
-    assert preview.selectedIndexes() == []
-    assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
+    assert len(preview.selectedIndexes()) == 1
+    assert (preview.currentRow(), preview.currentColumn()) == (14, 1)
     preview.close()
     assert app is not None
 
@@ -115,7 +115,7 @@ def test_preview_escape_dismisses_a_multi_cell_selection() -> None:
     assert app is not None
 
 
-def test_preview_blank_cell_click_dismisses_a_single_cell_focus() -> None:
+def test_preview_clicking_a_blank_cell_moves_the_active_selection() -> None:
     app = QApplication.instance() or QApplication([])
     preview = ExcelPreview()
     preview.load_template(Path("assets/CNC程序单.xlsx"))
@@ -128,9 +128,37 @@ def test_preview_blank_cell_click_dismisses_a_single_cell_focus() -> None:
     target = preview.model().index(14, 1)
     QTest.mouseClick(preview.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, preview.visualRect(target).center())
 
+    assert len(preview.selectedIndexes()) == 1
+    assert (preview.currentRow(), preview.currentColumn()) == (14, 1)
+    preview.close()
+    assert app is not None
+
+
+def test_clicking_outside_the_sheet_clears_selection_but_inside_click_selects() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.resize(1200, 800)
+    window.show()
+    app.processEvents()
+
+    preview = window.preview
+    preview.setCurrentCell(6, 1)
+    preview.setRangeSelected(QTableWidgetSelectionRange(6, 1, 7, 2), True)
+    target = preview.model().index(14, 1)
+    QTest.mouseClick(
+        preview.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        preview.visualRect(target).center(),
+    )
+    assert (preview.currentRow(), preview.currentColumn()) == (14, 1)
+    assert len(preview.selectedIndexes()) == 1
+
+    # Clicking another main-window pane cancels the active cell outline.
+    QTest.mouseClick(window.file_list.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     assert preview.selectedIndexes() == []
     assert (preview.currentRow(), preview.currentColumn()) == (-1, -1)
-    preview.close()
+    window.close()
     assert app is not None
 
 

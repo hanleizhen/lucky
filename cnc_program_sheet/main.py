@@ -1437,19 +1437,10 @@ class ExcelPreview(QTableWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: Any) -> None:
-        """Commit a drag-selected print range or dismiss it from a blank click."""
+        """Commit drag-selected ranges without cancelling blank cells."""
 
         super().mouseReleaseEvent(event)
         if event.button() != Qt.MouseButton.LeftButton:
-            return
-        index = self.indexAt(event.position().toPoint())
-        if (
-            self._active_cell_before_click
-            and self._is_plain_click(event, self._pointer_press_position)
-            and self._is_empty_grid_cell(index)
-        ):
-            self._dismiss_range_selection()
-            self._active_cell_before_click = False
             return
         self._active_cell_before_click = False
         selection = self._selection_rectangle()
@@ -2861,6 +2852,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(QLabel("已导入 NC 文件（双击可查看和手动修改程序）"))
         self.file_list = QListWidget()
         self.file_list.setMinimumWidth(265)
+        self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_list.itemDoubleClicked.connect(self.edit_imported_nc_file)
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._show_nc_import_menu)
@@ -2934,6 +2926,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
+        # Watch this window's existing controls only.  A QApplication-wide
+        # filter would also see unrelated dialogs and steal their shortcuts.
+        for widget in (self, *self.findChildren(QWidget)):
+            widget.installEventFilter(self)
 
     def _load_initial_template(self) -> None:
         candidate = Path(str(self.settings.get("template_path", "")))
@@ -3405,12 +3401,77 @@ class MainWindow(QMainWindow):
         self.preview_program_sheet()
 
     def _show_nc_import_menu(self, position: Any) -> None:
-        """Provide a mouse alternative to Ctrl+V in the imported-files pane."""
+        """Provide import, edit and removal actions in the imported-files pane."""
 
         menu = QMenu(self.file_list)
         paste = menu.addAction("粘贴 NC 文件 / 程序（与 Ctrl+V 相同）")
         paste.triggered.connect(self._paste_nc_from_menu)
+        item = self.file_list.itemAt(position)
+        if item is not None and not item.isSelected():
+            self.file_list.setCurrentItem(item)
+        selected_count = len(self.file_list.selectedItems())
+        if selected_count:
+            menu.addSeparator()
+            remove = menu.addAction(f"删除选中的 {selected_count} 个 NC 程序")
+            remove.triggered.connect(self.remove_selected_nc_programs)
         menu.exec(self.file_list.mapToGlobal(position))
+
+    def remove_selected_nc_programs(self) -> None:
+        """Remove selected records from this worksheet while keeping files."""
+
+        selected_items = self.file_list.selectedItems()
+        selected_sources = {
+            Path(str(item.data(Qt.ItemDataRole.UserRole))).resolve()
+            for item in selected_items
+            if item.data(Qt.ItemDataRole.UserRole)
+        }
+        if not selected_sources:
+            self.statusBar().showMessage("请先在“已导入 NC 文件”框选择要移除的程序。", 3500)
+            return
+
+        names = [item.text() for item in selected_items]
+        summary = "、".join(names[:5])
+        if len(names) > 5:
+            summary += f" 等 {len(names)} 个程序"
+        dialog = ApplicationDialog(
+            "移除所选 NC 程序？",
+            f"将从当前程序单和导入列表中移除：\n{summary}\n\n原始 NC 文件不会从电脑中删除。",
+            kind="warning",
+            buttons=(("取消", "cancel"), ("移除所选", "remove")),
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.choice != "remove":
+            return
+
+        indices = [
+            index
+            for index, record in enumerate(self.records)
+            if record is not None and record.source_path.resolve() in selected_sources
+        ]
+        if not indices:
+            self.statusBar().showMessage("所选 NC 程序已不在当前程序单中。", 3500)
+            return
+
+        # Remove from bottom to top so later deletions cannot invalidate the
+        # row indices of earlier selections. Existing helpers shift any
+        # following notes, markers and floating images together with records.
+        for index in reversed(indices):
+            table_row = LAYOUT.first_program_row - 1 + index
+            self.preview.shift_program_row_values(table_row, -1)
+            self._shift_tracked_program_cells(index, -1)
+            self._shift_program_images(index, -1)
+            self._shift_marker_rows_for_remove(index)
+            self.records.pop(index)
+
+        for source in selected_sources:
+            self.conversion_tags.pop(source, None)
+            self.m06_parse_snapshots.pop(source, None)
+        self._apply_records_to_view()
+        self.statusBar().showMessage(
+            f"已从当前程序单移除 {len(indices)} 条 NC 记录；原始文件仍保留在电脑中。",
+            5000,
+        )
 
     def _paste_nc_from_menu(self) -> None:
         if not self.paste_nc_from_clipboard():
@@ -3459,6 +3520,34 @@ class MainWindow(QMainWindow):
             return True
 
     def eventFilter(self, watched: Any, event: Any) -> bool:
+        belongs_to_main_window = False
+        inside_preview = False
+        if isinstance(watched, QWidget):
+            ancestor: QWidget | None = watched
+            while ancestor is not None:
+                if ancestor is self.preview:
+                    inside_preview = True
+                if ancestor is self:
+                    belongs_to_main_window = True
+                    break
+                ancestor = ancestor.parentWidget()
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if belongs_to_main_window and not inside_preview:
+                self.preview._dismiss_range_selection()
+        if belongs_to_main_window and event.type() == QEvent.Type.KeyPress:
+            if watched in {self.file_list, self.file_list.viewport()} and event.key() == Qt.Key.Key_Delete:
+                self.remove_selected_nc_programs()
+                event.accept()
+                return True
+            if watched in getattr(self, "_nc_drop_targets", ()):
+                if event.matches(QKeySequence.StandardKey.Save):
+                    self.save_template_layout()
+                    event.accept()
+                    return True
+                if event.matches(QKeySequence.StandardKey.Paste) and self._clipboard_contains_nc_input():
+                    self.paste_nc_from_clipboard()
+                    event.accept()
+                    return True
         if watched in getattr(self, "_nc_drop_targets", ()) and event.type() in {
             QEvent.Type.DragEnter,
             QEvent.Type.DragMove,
@@ -3469,15 +3558,6 @@ class MainWindow(QMainWindow):
                 if event.type() == QEvent.Type.Drop:
                     self.add_nc_files(paths)
                 event.acceptProposedAction()
-                return True
-        if event.type() == QEvent.Type.KeyPress:
-            if event.matches(QKeySequence.StandardKey.Save):
-                self.save_template_layout()
-                event.accept()
-                return True
-            if event.matches(QKeySequence.StandardKey.Paste) and self._clipboard_contains_nc_input():
-                self.paste_nc_from_clipboard()
-                event.accept()
                 return True
         return super().eventFilter(watched, event)
 
