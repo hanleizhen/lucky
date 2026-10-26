@@ -30,9 +30,12 @@ def test_print_orientation_and_toolbar_visibility_preferences_are_available() ->
     )
     assert not settings.toolbar_buttons["print"].isChecked()
     assert not settings.install_mastercam_button.isChecked()
+    assert not settings.exit_on_window_close.isChecked()
     assert not settings.mastercam_nc_folder.text()
     settings.install_mastercam_button.setChecked(True)
     assert settings.install_mastercam_button.isChecked()
+    settings.exit_on_window_close.setChecked(True)
+    assert settings.exit_on_window_close.isChecked()
     settings.mastercam_nc_folder.setText(r"C:\Users\Administrator\Documents\My Mastercam 2022\Mastercam\Mill\NC")
     assert settings.mastercam_nc_folder.text().endswith(r"Mastercam\Mill\NC")
     assert settings.selected_selection_color() == "#c6efce"

@@ -63,7 +63,7 @@ jobs:
           @{
             version = $version
             installer_name = $installerName
-            notes = "新增：可在设置中指定 Mastercam NC 默认文件夹；按钮优先使用该目录，也兼容嵌套安装路径。"
+            notes = "新增：可在设置中选择点击窗口 X 时直接退出或缩小到隐藏图标区。"
           } | ConvertTo-Json -Compress | Set-Content build/installer/CNCProgramSheet_update.json -NoNewline -Encoding utf8
           "path=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload build artifact

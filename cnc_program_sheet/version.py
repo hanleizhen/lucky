@@ -1,6 +1,6 @@
 """Single source of truth for the application version."""
 
-__version__ = "1.1.57"
+__version__ = "1.1.58"
 APP_NAME = "CNC 智能程序单"
 APP_ICON_FILE = "cnc_smart_sheet_icon.ico"
 # Keep this identifier stable across releases.  Windows uses it to associate
@@ -12,6 +12,7 @@ APP_USER_MODEL_ID = "CNCProgramSheet.CNCSmartSheet"
 # their network is unavailable immediately after an update.  Update this list
 # whenever ``__version__`` changes.
 RELEASE_NOTES: tuple[str, ...] = (
+    "新增：设置中可选择点击窗口 X 时直接退出，或继续缩小到 Windows 隐藏图标区。",
     "新增：可在设置中指定 Mastercam NC 默认文件夹，按钮会优先从该目录打开 NC 选择窗口。",
     "修复：Mastercam 安装在嵌套目录时，按钮弹出的 NC 文件选择窗口仍默认打开对应版本的 Mill\\NC 文件夹。",
     "修复：兼容 Mastercam.exe 位于产品子目录中的标准安装布局，解决 Mastercam 2022 未被自动检测的问题。",

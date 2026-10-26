@@ -2160,6 +2160,7 @@ class SettingsDialog(QDialog):
         show_repeat_error_nudge: bool = True,
         install_mastercam_button: bool = False,
         mastercam_nc_folder: str = "",
+        exit_on_window_close: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2179,6 +2180,10 @@ class SettingsDialog(QDialog):
         self.confirm_before_save.setChecked(confirm_before_save)
         self.open_folder_after_save = QCheckBox("保存完成后打开所在文件夹")
         self.open_folder_after_save.setChecked(open_folder_after_save)
+        self.exit_on_window_close = QCheckBox(
+            "点击窗口右上角 X 时直接退出（不缩小到隐藏图标区）"
+        )
+        self.exit_on_window_close.setChecked(exit_on_window_close)
         self.install_mastercam_button = QCheckBox("启动时自动安装或更新 Mastercam 按钮（支持 2021–2027）")
         self.install_mastercam_button.setChecked(install_mastercam_button)
         self.mastercam_nc_folder = QLineEdit(mastercam_nc_folder)
@@ -2198,6 +2203,7 @@ class SettingsDialog(QDialog):
         general_note.setWordWrap(True)
         general_layout.addWidget(general_note)
         general_layout.addWidget(self.open_folder_after_save)
+        general_layout.addWidget(self.exit_on_window_close)
         general_layout.addWidget(self.install_mastercam_button)
         mastercam_note = QLabel("勾选后保存设置并重新启动软件，即会自动检测并安装按钮。取消勾选只会停止后续自动安装，不会删除已安装的按钮。")
         mastercam_note.setWordWrap(True)
@@ -4456,6 +4462,12 @@ class MainWindow(QMainWindow):
             bool(self.settings.get("show_repeat_error_nudge", True)),
             bool(self.settings.get("install_mastercam_button", False)),
             str(self.settings.get("mastercam_nc_folder", "")),
+            bool(
+                self.settings.get(
+                    "exit_on_window_close",
+                    self.settings.get("close_window_behavior") == "exit",
+                )
+            ),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -4467,6 +4479,9 @@ class MainWindow(QMainWindow):
             self.settings["confirm_before_clear"] = dialog.confirm_before_clear.isChecked()
             self.settings["confirm_before_save"] = dialog.confirm_before_save.isChecked()
             self.settings["open_folder_after_save"] = dialog.open_folder_after_save.isChecked()
+            self.settings["exit_on_window_close"] = dialog.exit_on_window_close.isChecked()
+            # The explicit setting supersedes the older one-time X-button choice.
+            self.settings.pop("close_window_behavior", None)
             self.settings["toolbar_button_visibility"] = {
                 key: checkbox.isChecked() for key, checkbox in dialog.toolbar_buttons.items()
             }
@@ -4763,6 +4778,13 @@ class MainWindow(QMainWindow):
             or (application is not None and application.platformName().casefold() == "offscreen")
         ):
             event.accept()
+            return
+        if "exit_on_window_close" in self.settings:
+            if bool(self.settings.get("exit_on_window_close")):
+                event.accept()
+            else:
+                event.ignore()
+                self._hide_to_tray()
             return
         remembered = str(self.settings.get("close_window_behavior", ""))
         if remembered == "minimize":
