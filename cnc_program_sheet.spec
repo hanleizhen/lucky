@@ -10,6 +10,14 @@ datas = [
     (str(project / "assets" / "update_source.json"), "assets"),
     (str(project / "assets" / "cnc_smart_sheet_icon.ico"), "assets"),
 ]
+datas.extend(
+    (str(project / "assets" / "mastercam_addin" / name), "assets/mastercam_addin")
+    for name in (
+        "GenerateProgramSheet.dll",
+        "GenerateProgramSheet.ft",
+        "GenerateProgramSheet.csx",
+    )
+)
 
 analysis = Analysis(
     [str(project / "launcher.py")],

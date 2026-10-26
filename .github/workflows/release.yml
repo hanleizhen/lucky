@@ -29,21 +29,17 @@ jobs:
         run: python -m pytest -q
       - name: Configure release update source
         run: python scripts/set_release_repository.py $env:GITHUB_REPOSITORY
-      - name: Build windowed application
+      - name: Build application
         shell: pwsh
         run: |
-          # Keep unrelated runner DLLs out of PyInstaller's dependency scan.
           $pythonDir = Split-Path (Get-Command python).Source
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$pythonDir"
-          python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work cnc_program_sheet.spec
+          python -m PyInstaller --noconfirm --clean cnc_program_sheet.spec
       - name: Verify packaged application self-check
         shell: pwsh
         run: |
           $marker = Join-Path $env:RUNNER_TEMP "cnc-program-sheet-self-check.txt"
           $env:CNC_PROGRAM_SHEET_SELF_CHECK_MARKER = $marker
-          # The application is a windowed EXE. PowerShell's call operator
-          # does not wait for windowed processes, so capture its real exit
-          # code through Start-Process instead of reading $LASTEXITCODE.
           $application = (Resolve-Path "build/dist/CNCProgramSheet/CNCProgramSheet.exe").Path
           $process = Start-Process -FilePath $application -ArgumentList "--self-check" -Wait -PassThru -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "Packaged application self-check failed with exit code $($process.ExitCode)." }
@@ -54,28 +50,22 @@ jobs:
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.app_version.outputs.version }}" installer.iss
-      - name: Create SHA-256 manifest
+      - name: Create checksum and updater manifest
         id: installer
         shell: pwsh
         run: |
-          $installer = Get-ChildItem build/installer/*_Setup_x64.exe | Select-Object -First 1
-          # ASCII is intentional: the updater's cmd.exe handoff must work on
-          # every Windows system locale, including systems without a Chinese
-          # console code page.
-          $publishedName = "CNCProgramSheet_${{ steps.app_version.outputs.version }}_Setup_x64.exe"
-          $publishedInstaller = Join-Path $installer.DirectoryName $publishedName
-          Move-Item -LiteralPath $installer.FullName -Destination $publishedInstaller -Force
-          $hash = (Get-FileHash $publishedInstaller -Algorithm SHA256).Hash.ToLower()
-          "$hash *$publishedName" | Set-Content build/installer/SHA256SUMS.txt -NoNewline
-          # This fixed-name asset is read through GitHub's public
-          # releases/latest/download endpoint. It avoids api.github.com's
-          # shared anonymous rate limit for end-user update checks.
+          $version = "${{ steps.app_version.outputs.version }}"
+          $installerName = "CNCProgramSheet_${version}_Setup_x64.exe"
+          $installer = Join-Path (Resolve-Path build/installer).Path $installerName
+          if (!(Test-Path -LiteralPath $installer)) { throw "The setup installer is missing." }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          "$hash *$installerName" | Set-Content build/installer/SHA256SUMS.txt -NoNewline
           @{
-            version = "${{ steps.app_version.outputs.version }}"
-            installer_name = $publishedName
-            notes = ""
+            version = $version
+            installer_name = $installerName
+            notes = "新增可选的 Mastercam 按钮自动安装设置。"
           } | ConvertTo-Json -Compress | Set-Content build/installer/CNCProgramSheet_update.json -NoNewline -Encoding utf8
-          "path=$publishedInstaller" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "path=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

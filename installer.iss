@@ -16,7 +16,7 @@ DefaultDirName={autopf}\CNC Program Sheet
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=build\installer
-OutputBaseFilename={#MyAppName}_{#MyAppVersion}_Setup_x64
+OutputBaseFilename=CNCProgramSheet_{#MyAppVersion}_Setup_x64
 SetupIconFile=assets\cnc_smart_sheet_icon.ico
 Compression=lzma2
 SolidCompression=yes
@@ -65,7 +65,9 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
+  begin
     RemoveObsoleteExplorerNcCommands;
+  end;
 end;
 
 [Run]

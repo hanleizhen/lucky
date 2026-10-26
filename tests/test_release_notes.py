@@ -1,5 +1,8 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -92,6 +95,49 @@ def test_an_older_seen_version_shows_the_new_version_note(monkeypatch) -> None:
         window.show_release_notes_if_needed()
         assert len(_RecordedDialog.created) == 1
         assert settings["release_notes_seen_version"] == main_module.__version__
+    finally:
+        window.tray_icon.hide()
+        window.close()
+    assert app is not None
+
+
+def test_mastercam_button_installs_only_after_user_enables_the_setting(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    settings: dict[str, object] = {"install_mastercam_button": True}
+    installed: list[bool] = []
+
+    class InfoDialog:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(main_module, "load_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "save_settings", lambda _current: None)
+    monkeypatch.setattr(
+        main_module,
+        "default_user_template",
+        lambda: Path("assets/CNC程序单.xlsx").resolve(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "install_mastercam_addin",
+        lambda: (installed.append(True), SimpleNamespace(installed_years=(2024,)))[1],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resource_path",
+        lambda *_parts: Path("assets/mastercam_addin/GenerateProgramSheet.csx").resolve(),
+    )
+    monkeypatch.setattr(main_module, "ApplicationDialog", InfoDialog)
+
+    window = main_module.MainWindow()
+    try:
+        window.install_mastercam_addin_if_enabled()
+        window.install_mastercam_addin_if_enabled()
+
+        assert len(installed) == 1
+        assert settings["mastercam_addin_installed_version"] == main_module.__version__
     finally:
         window.tray_icon.hide()
         window.close()

@@ -29,6 +29,9 @@ def test_print_orientation_and_toolbar_visibility_preferences_are_available() ->
         "#C6EFCE",
     )
     assert not settings.toolbar_buttons["print"].isChecked()
+    assert not settings.install_mastercam_button.isChecked()
+    settings.install_mastercam_button.setChecked(True)
+    assert settings.install_mastercam_button.isChecked()
     assert settings.selected_selection_color() == "#c6efce"
 
     preview = ProgramSheetPrintPreviewDialog(QPrinter(), lambda printer: None, "A1:K25", 8)

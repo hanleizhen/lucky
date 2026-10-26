@@ -60,6 +60,7 @@ from .app_paths import (
     log_exception,
     resource_path,
     save_settings,
+    user_data_dir,
 )
 from .excel_service import (
     LAYOUT,
@@ -73,6 +74,8 @@ from .excel_service import (
 )
 from .error_dialog import ApplicationDialog, ErrorDialog
 from .models import ImagePlacement, ProgramRecord, UNRECOGNIZED
+from .mastercam_install import MastercamInstallError, install_mastercam_addin
+from .single_instance import SingleInstanceCoordinator
 from .nc_parser import parse_file_records, parse_records_text
 from .nc_transform import TransformMode, decode_windows_default, encode_windows_default, transform_file
 from .update_service import (
@@ -2155,6 +2158,7 @@ class SettingsDialog(QDialog):
         appearance_mode: str = "light",
         window_color: str = DEFAULT_WINDOW_COLOR,
         show_repeat_error_nudge: bool = True,
+        install_mastercam_button: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2174,6 +2178,8 @@ class SettingsDialog(QDialog):
         self.confirm_before_save.setChecked(confirm_before_save)
         self.open_folder_after_save = QCheckBox("保存完成后打开所在文件夹")
         self.open_folder_after_save.setChecked(open_folder_after_save)
+        self.install_mastercam_button = QCheckBox("启动时自动安装或更新 Mastercam 按钮（支持 2021–2027）")
+        self.install_mastercam_button.setChecked(install_mastercam_button)
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -2186,6 +2192,10 @@ class SettingsDialog(QDialog):
         general_note.setWordWrap(True)
         general_layout.addWidget(general_note)
         general_layout.addWidget(self.open_folder_after_save)
+        general_layout.addWidget(self.install_mastercam_button)
+        mastercam_note = QLabel("勾选后保存设置并重新启动软件，即会自动检测并安装按钮。取消勾选只会停止后续自动安装，不会删除已安装的按钮。")
+        mastercam_note.setWordWrap(True)
+        general_layout.addWidget(mastercam_note)
         general_layout.addStretch(1)
         tabs.addTab(general, "常规")
 
@@ -2709,6 +2719,8 @@ class MainWindow(QMainWindow):
         self._last_error_key = ""
         self._last_error_at = 0.0
         self._consecutive_error_count = 0
+        self._external_launch_queue: list[dict[str, Any]] = []
+        self._processing_external_launch = False
         # An update installer must be allowed to close the running process
         # without the ordinary user-facing close/minimize question.
         self._exiting_for_update = False
@@ -2774,6 +2786,39 @@ class MainWindow(QMainWindow):
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
             self._restore_from_tray()
+
+    def queue_external_launch(self, request: dict[str, Any]) -> None:
+        """Bring the existing app forward and queue a forwarded launch request."""
+
+        self._external_launch_queue.append(request)
+        self._restore_from_tray()
+        self._process_next_external_launch()
+
+    def _process_next_external_launch(self) -> None:
+        if self._processing_external_launch or not self._external_launch_queue:
+            return
+        self._processing_external_launch = True
+        request = self._external_launch_queue.pop(0)
+        try:
+            raw_paths = request.get("import_paths", [])
+            paths = [Path(item) for item in raw_paths if isinstance(item, str)] if isinstance(raw_paths, list) else []
+            raw_mode = request.get("conversion_mode")
+            mode = {
+                "M06": TransformMode.M06,
+                "M304": TransformMode.M304,
+                "COPPER": TransformMode.COPPER,
+            }.get(raw_mode)
+            if paths and mode is not None:
+                if bool(request.get("apply_conversion")):
+                    self.convert_and_import_mastercam_files(mode, paths)
+                else:
+                    self.open_conversion_dialog(mode, paths)
+            elif paths:
+                self.add_nc_files(paths)
+        finally:
+            self._processing_external_launch = False
+            if self._external_launch_queue:
+                QTimer.singleShot(0, self._process_next_external_launch)
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -2983,6 +3028,47 @@ class MainWindow(QMainWindow):
         # the promise that a given version never interrupts startup twice.
         self.settings["release_notes_seen_version"] = __version__
         save_settings(self.settings)
+
+    def install_mastercam_addin_if_enabled(self) -> None:
+        """Install/update the Mastercam button on startup when the user opted in."""
+
+        if not bool(self.settings.get("install_mastercam_button", False)):
+            return
+        if not resource_path("assets", "mastercam_addin", "GenerateProgramSheet.csx").is_file():
+            return
+        key = "mastercam_addin_installed_version"
+        if str(self.settings.get(key, "")) == __version__:
+            return
+
+        try:
+            result = install_mastercam_addin()
+        except MastercamInstallError as exc:
+            self.statusBar().showMessage(f"Mastercam 按钮未安装：{exc}", 10000)
+            ApplicationDialog(
+                "未能安装 Mastercam 按钮",
+                f"{exc}\n\n设置仍保持启用。安装或修复 Mastercam 后，重新启动本软件即可重试。",
+                kind="warning",
+                parent=self,
+            ).exec()
+            return
+        except OSError as exc:
+            ApplicationDialog(
+                "安装 Mastercam 按钮失败",
+                f"写入 Mastercam 加载项目录失败：{exc}\n\n请检查目录权限后重新启动本软件重试。",
+                kind="error",
+                parent=self,
+            ).exec()
+            return
+
+        self.settings[key] = __version__
+        save_settings(self.settings)
+        years = "、".join(str(year) for year in result.installed_years)
+        ApplicationDialog(
+            "Mastercam 按钮安装完成",
+            f"已安装到 Mastercam {years} 的用户加载项目录。请关闭并重新打开 Mastercam 后使用。",
+            kind="info",
+            parent=self,
+        ).exec()
 
     def load_template(self, path: Path) -> None:
         try:
@@ -3630,7 +3716,7 @@ class MainWindow(QMainWindow):
         )
         self.add_nc_files([Path(filename) for filename in filenames])
 
-    def open_conversion_dialog(self, mode: TransformMode) -> None:
+    def open_conversion_dialog(self, mode: TransformMode, initial_paths: list[Path] | None = None) -> None:
         """Open one legacy-shortcut-compatible conversion page.
 
         The dialog is intentionally the only place where a conversion writes
@@ -3640,9 +3726,56 @@ class MainWindow(QMainWindow):
         """
 
         dialog = NcConversionDialog(mode, self)
+        if initial_paths:
+            dialog.add_paths(initial_paths)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._import_converted_files(dialog.converted_files, mode)
+
+    def convert_and_import_mastercam_files(self, mode: TransformMode, paths: list[Path]) -> None:
+        """Apply the selected legacy conversion directly to chosen posted NCs.
+
+        This path is used only by the Mastercam bridge after the operator has
+        explicitly selected both a conversion mode and the NC file(s). The
+        established transform_file behavior is retained, including in-place
+        M06/M304 writes and copper output replacement/deletion.
+        """
+
+        converted: list[ConversionResult] = []
+        failures: list[str] = []
+        for source in paths:
+            try:
+                parser_snapshot = (
+                    decode_windows_default(source.read_bytes())
+                    if mode is TransformMode.M06
+                    else None
+                )
+                target = transform_file(source, mode)
+                if not target.is_file():
+                    failures.append(f"{source.name}：未生成可导入的 NC 程序。")
+                    continue
+                converted.append(ConversionResult(source, target.resolve(), parser_snapshot))
+            except Exception as exc:
+                failures.append(f"{source.name}：{exc}")
+
+        if failures and not converted:
+            ApplicationDialog(
+                "NC 程序未能处理",
+                "所选文件没有成功修改或导入。",
+                kind="error",
+                details="\n".join(failures),
+                parent=self,
+            ).exec()
+            return
+        if failures:
+            ApplicationDialog(
+                "部分 NC 程序处理失败",
+                "成功处理的程序将继续导入程序单；失败项目未能完成处理。",
+                kind="warning",
+                details="\n".join(failures),
+                parent=self,
+            ).exec()
+        self._import_converted_files(converted, mode)
 
     def _import_converted_files(self, converted_files: list[ConversionResult], mode: TransformMode) -> None:
         """Parse shortcut outputs and retain their pale-blue source labels.
@@ -4301,6 +4434,7 @@ class MainWindow(QMainWindow):
             str(self.settings.get("appearance_mode", "light")),
             str(self.settings.get("window_color", DEFAULT_WINDOW_COLOR)),
             bool(self.settings.get("show_repeat_error_nudge", True)),
+            bool(self.settings.get("install_mastercam_button", False)),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -4320,6 +4454,8 @@ class MainWindow(QMainWindow):
             self.settings["selection_color"] = dialog.selected_selection_color()
             self.settings["appearance_mode"] = dialog.selected_appearance_mode()
             self.settings["window_color"] = dialog.selected_window_color()
+            previous_mastercam_install = bool(self.settings.get("install_mastercam_button", False))
+            self.settings["install_mastercam_button"] = dialog.install_mastercam_button.isChecked()
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
@@ -4335,6 +4471,13 @@ class MainWindow(QMainWindow):
                 )
             self.preview.set_selection_color(self.settings["selection_color"])
             self.statusBar().showMessage("设置已保存。", 3500)
+            if dialog.install_mastercam_button.isChecked() and not previous_mastercam_install:
+                ApplicationDialog(
+                    "需要重新启动",
+                    "Mastercam 按钮安装选项已启用。请重新启动 CNC 智能程序单，软件会自动检测并安装按钮。",
+                    kind="info",
+                    parent=self,
+                ).exec()
 
     def open_find_replace(self, replace_mode: bool = True) -> None:
         """Show non-destructive Excel-style find/replace for the sheet preview."""
@@ -4688,11 +4831,60 @@ def parse_launch_arguments(arguments: list[str] | None = None) -> list[Path]:
     return [Path(path) for group in (parsed.import_nc or []) for path in group]
 
 
+def parse_conversion_launch_mode(arguments: list[str] | None = None) -> TransformMode | None:
+    """Return the optional shortcut mode requested by the Mastercam bridge."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--conversion-mode", choices=("M06", "M304", "COPPER"))
+    parsed, _unknown = parser.parse_known_args(sys.argv[1:] if arguments is None else arguments)
+    return {
+        "M06": TransformMode.M06,
+        "M304": TransformMode.M304,
+        "COPPER": TransformMode.COPPER,
+    }.get(parsed.conversion_mode)
+
+
+def parse_mastercam_launch(arguments: list[str] | None = None) -> bool:
+    """Whether the app was opened by its installed Mastercam add-in."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--from-mastercam", action="store_true")
+    parsed, _unknown = parser.parse_known_args(sys.argv[1:] if arguments is None else arguments)
+    return bool(parsed.from_mastercam)
+
+
+def parse_apply_conversion(arguments: list[str] | None = None) -> bool:
+    """Whether the bridge should execute the chosen transform immediately."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--apply-conversion", action="store_true")
+    parsed, _unknown = parser.parse_known_args(sys.argv[1:] if arguments is None else arguments)
+    return bool(parsed.apply_conversion)
+
+
 def run() -> int:
     _set_windows_app_user_model_id()
-    import_paths = parse_launch_arguments()
+    launch_arguments = sys.argv[1:]
+    import_paths = parse_launch_arguments(launch_arguments)
+    conversion_mode = parse_conversion_launch_mode(launch_arguments)
+    apply_conversion = parse_apply_conversion(launch_arguments)
+    from_mastercam = parse_mastercam_launch(launch_arguments)
+    launch_request: dict[str, Any] = {
+        "import_paths": [str(path) for path in import_paths],
+        "conversion_mode": (
+            "COPPER" if conversion_mode is TransformMode.COPPER
+            else conversion_mode.value if conversion_mode is not None
+            else None
+        ),
+        "apply_conversion": apply_conversion,
+    }
     # Keep integration arguments away from Qt's own option parser.
     app = QApplication([sys.argv[0]])
+    coordinator = SingleInstanceCoordinator()
+    requests_received_before_window: list[dict[str, Any]] = []
+    coordinator.request_received.connect(requests_received_before_window.append)
+    if not coordinator.start_or_forward(launch_request):
+        return 0
     appearance_settings = load_settings()
     apply_application_theme(
         app,
@@ -4705,12 +4897,21 @@ def run() -> int:
     if not icon.isNull():
         app.setWindowIcon(icon)
     window = MainWindow()
+    coordinator.request_received.connect(window.queue_external_launch)
     window.show()
-    if import_paths:
-        QTimer.singleShot(0, lambda: window.add_nc_files(import_paths))
+    has_startup_request = bool(import_paths)
+    if has_startup_request:
+        QTimer.singleShot(120, lambda: window.queue_external_launch(launch_request))
+    for index, request in enumerate(requests_received_before_window):
+        QTimer.singleShot(160 + index * 30, lambda current=request: window.queue_external_launch(current))
     # Wait until the main window is visible so the update summary is a normal
     # child dialog rather than a startup flash behind the application window.
-    QTimer.singleShot(260, window.show_release_notes_if_needed)
+    def show_startup_dialogs() -> None:
+        window.install_mastercam_addin_if_enabled()
+        window.show_release_notes_if_needed()
+
+    QTimer.singleShot(260, show_startup_dialogs)
+    app.aboutToQuit.connect(coordinator.close)
     return app.exec()
 
 
