@@ -2159,11 +2159,12 @@ class SettingsDialog(QDialog):
         window_color: str = DEFAULT_WINDOW_COLOR,
         show_repeat_error_nudge: bool = True,
         install_mastercam_button: bool = False,
+        mastercam_nc_folder: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(560, 405)
+        self.resize(600, 465)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
@@ -2180,6 +2181,11 @@ class SettingsDialog(QDialog):
         self.open_folder_after_save.setChecked(open_folder_after_save)
         self.install_mastercam_button = QCheckBox("启动时自动安装或更新 Mastercam 按钮（支持 2021–2027）")
         self.install_mastercam_button.setChecked(install_mastercam_button)
+        self.mastercam_nc_folder = QLineEdit(mastercam_nc_folder)
+        self.mastercam_nc_folder.setPlaceholderText("留空时按 Mastercam 版本自动查找 NC 文件夹")
+        self.mastercam_nc_folder.setToolTip("Mastercam 程序单按钮打开的 NC 文件夹；留空时根据 Mastercam 版本自动查找。")
+        browse_mastercam_folder = QPushButton("浏览…")
+        browse_mastercam_folder.clicked.connect(self._browse_mastercam_nc_folder)
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -2196,6 +2202,14 @@ class SettingsDialog(QDialog):
         mastercam_note = QLabel("勾选后保存设置并重新启动软件，即会自动检测并安装按钮。取消勾选只会停止后续自动安装，不会删除已安装的按钮。")
         mastercam_note.setWordWrap(True)
         general_layout.addWidget(mastercam_note)
+        general_layout.addWidget(QLabel("Mastercam NC 默认文件夹："))
+        mastercam_folder_row = QHBoxLayout()
+        mastercam_folder_row.addWidget(self.mastercam_nc_folder, 1)
+        mastercam_folder_row.addWidget(browse_mastercam_folder)
+        general_layout.addLayout(mastercam_folder_row)
+        mastercam_folder_note = QLabel("设置后，Mastercam 按钮每次优先从这个文件夹选择 NC 文件；清空后恢复按版本自动查找。")
+        mastercam_folder_note.setWordWrap(True)
+        general_layout.addWidget(mastercam_folder_note)
         general_layout.addStretch(1)
         tabs.addTab(general, "常规")
 
@@ -2369,6 +2383,12 @@ class SettingsDialog(QDialog):
         color = QColorDialog.getColor(QColor(self.selected_window_color()), self, "选择窗口颜色")
         if color.isValid():
             self.window_color.setText(color.name())
+
+    def _browse_mastercam_nc_folder(self) -> None:
+        start = self.mastercam_nc_folder.text().strip() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "选择 Mastercam NC 默认文件夹", start)
+        if selected:
+            self.mastercam_nc_folder.setText(selected)
 
     def _restore_default_window_color(self) -> None:
         default = DEFAULT_DARK_WINDOW_COLOR if self.selected_appearance_mode() == "dark" else DEFAULT_WINDOW_COLOR
@@ -4435,6 +4455,7 @@ class MainWindow(QMainWindow):
             str(self.settings.get("window_color", DEFAULT_WINDOW_COLOR)),
             bool(self.settings.get("show_repeat_error_nudge", True)),
             bool(self.settings.get("install_mastercam_button", False)),
+            str(self.settings.get("mastercam_nc_folder", "")),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -4456,11 +4477,22 @@ class MainWindow(QMainWindow):
             self.settings["window_color"] = dialog.selected_window_color()
             previous_mastercam_install = bool(self.settings.get("install_mastercam_button", False))
             self.settings["install_mastercam_button"] = dialog.install_mastercam_button.isChecked()
+            mastercam_nc_folder = dialog.mastercam_nc_folder.text().strip()
+            self.settings["mastercam_nc_folder"] = mastercam_nc_folder
             # Re-enabling save notifications should take effect on the next
             # save even if this build has already shown its first-save notice.
             if dialog.save_reminder.isChecked() and not previous_reminder:
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
+            try:
+                (user_data_dir() / "mastercam_nc_folder.txt").write_text(
+                    mastercam_nc_folder, encoding="utf-8"
+                )
+            except OSError as exc:
+                self.show_error(
+                    "Mastercam 文件夹设置未同步",
+                    f"设置已保存，但按钮读取路径时可能仍会使用自动识别的目录。\n\n{exc}",
+                )
             self._apply_toolbar_button_visibility()
             application = QApplication.instance()
             if application is not None:

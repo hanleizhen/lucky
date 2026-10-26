@@ -81,6 +81,15 @@ def test_mastercam_bridge_finds_year_in_parent_of_nested_executable_folder() -> 
     assert packaged_source == source
 
 
+def test_mastercam_bridge_prefers_saved_nc_folder_setting() -> None:
+    source = Path("mastercam_addin/GenerateProgramSheet.csx").read_text(encoding="utf-8")
+
+    assert '"CNCProgramSheet", "mastercam_nc_folder.txt"' in source
+    assert source.index('if (System.IO.Directory.Exists(configuredFolder))') < source.index(
+        'var processPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;'
+    )
+
+
 def test_conversion_launch_preloads_nc_into_the_matching_conversion_window(tmp_path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "part.NC"

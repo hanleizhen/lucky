@@ -69,6 +69,19 @@ public class App
     {
         try
         {
+            var localAppData = System.Environment.GetFolderPath(
+                System.Environment.SpecialFolder.LocalApplicationData);
+            var configuredFolderFile = System.IO.Path.Combine(
+                localAppData, "CNCProgramSheet", "mastercam_nc_folder.txt");
+            if (System.IO.File.Exists(configuredFolderFile))
+            {
+                var configuredFolder = System.IO.File.ReadAllText(configuredFolderFile).Trim();
+                if (System.IO.Directory.Exists(configuredFolder))
+                {
+                    return configuredFolder;
+                }
+            }
+
             var documents = System.Environment.GetFolderPath(
                 System.Environment.SpecialFolder.MyDocuments);
             var processPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
