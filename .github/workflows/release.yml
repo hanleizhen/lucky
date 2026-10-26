@@ -63,7 +63,7 @@ jobs:
           @{
             version = $version
             installer_name = $installerName
-            notes = "修复：兼容 Mastercam 安装程序位于 Mastercam 子目录的布局，确保自动安装按钮能识别 Mastercam 2022。"
+            notes = "修复：Mastercam 安装在嵌套目录时，按钮弹出的 NC 文件选择窗口默认打开对应版本的 Mill\\NC 文件夹。"
           } | ConvertTo-Json -Compress | Set-Content build/installer/CNCProgramSheet_update.json -NoNewline -Encoding utf8
           "path=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload build artifact

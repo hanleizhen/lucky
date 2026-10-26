@@ -72,13 +72,24 @@ public class App
             var documents = System.Environment.GetFolderPath(
                 System.Environment.SpecialFolder.MyDocuments);
             var processPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-            var installFolder = System.IO.Path.GetFileName(
+            var installDirectory = new System.IO.DirectoryInfo(
                 System.IO.Path.GetDirectoryName(processPath));
-            var match = System.Text.RegularExpressions.Regex.Match(installFolder, @"20\d{2}");
-            if (match.Success)
+            var year = "";
+            while (installDirectory != null)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    installDirectory.Name, @"20\d{2}");
+                if (match.Success)
+                {
+                    year = match.Value;
+                    break;
+                }
+                installDirectory = installDirectory.Parent;
+            }
+            if (!System.String.IsNullOrEmpty(year))
             {
                 var profile = System.IO.Path.Combine(
-                    documents, "My Mastercam " + match.Value, "Mastercam");
+                    documents, "My Mastercam " + year, "Mastercam");
                 var candidates = new string[] {
                     System.IO.Path.Combine(profile, "Mill", "NC"),
                     System.IO.Path.Combine(profile, "NC"),

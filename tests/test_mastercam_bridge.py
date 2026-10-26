@@ -71,6 +71,16 @@ def test_mastercam_chooser_no_longer_contains_g1_post_api() -> None:
     assert "PostSelectedOperationsAndImport" not in source
 
 
+def test_mastercam_bridge_finds_year_in_parent_of_nested_executable_folder() -> None:
+    source = Path("mastercam_addin/GenerateProgramSheet.csx").read_text(encoding="utf-8")
+    packaged_source = Path("assets/mastercam_addin/GenerateProgramSheet.csx").read_text(encoding="utf-8")
+
+    assert "while (installDirectory != null)" in source
+    assert "installDirectory = installDirectory.Parent;" in source
+    assert '"My Mastercam " + year' in source
+    assert packaged_source == source
+
+
 def test_conversion_launch_preloads_nc_into_the_matching_conversion_window(tmp_path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "part.NC"
