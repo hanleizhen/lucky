@@ -32,10 +32,17 @@ def test_print_orientation_and_toolbar_visibility_preferences_are_available() ->
     assert not settings.install_mastercam_button.isChecked()
     assert not settings.exit_on_window_close.isChecked()
     assert not settings.mastercam_nc_folder.text()
+    assert settings.mastercam_sequence_search_enabled.isChecked()
+    assert settings.mastercam_sequence_search_count.value() == 11
+    assert not settings.show_mastercam_install_success.isChecked()
+    assert settings.print_quality.currentData() == "high"
     settings.install_mastercam_button.setChecked(True)
     assert settings.install_mastercam_button.isChecked()
     settings.exit_on_window_close.setChecked(True)
     assert settings.exit_on_window_close.isChecked()
+    settings.mastercam_sequence_search_count.setValue(12)
+    settings.print_quality.setCurrentIndex(settings.print_quality.findData("maximum"))
+    assert settings.print_quality.currentData() == "maximum"
     settings.mastercam_nc_folder.setText(r"C:\Users\Administrator\Documents\My Mastercam 2022\Mastercam\Mill\NC")
     assert settings.mastercam_nc_folder.text().endswith(r"Mastercam\Mill\NC")
     assert settings.selected_selection_color() == "#c6efce"
@@ -76,6 +83,10 @@ def test_print_area_and_layout_preferences_are_persisted_per_template(monkeypatc
         assert window.settings["print_orientation"] == "portrait"
         assert window._configured_print_orientation() == QPageLayout.Orientation.Portrait
         assert window._configured_print_margin_mm() == 12
+        window.settings["print_quality"] = "standard"
+        assert window._configured_print_render_scale() == 3
+        window.settings["print_quality"] = "maximum"
+        assert window._configured_print_render_scale() == 7
         assert stored
 
         window.clear_print_area()

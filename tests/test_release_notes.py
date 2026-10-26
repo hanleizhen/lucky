@@ -44,7 +44,10 @@ def test_release_notes_are_shown_once_per_installed_version(monkeypatch) -> None
         title, message, kwargs = _RecordedDialog.created[0]
         assert f"v{main_module.__version__}" in title
         assert "本次更新内容" in message
-        assert "同一版本只显示一次" in message
+        assert "只会在首次打开本版本时显示一次" in message
+        assert "打印清晰度" in message
+        assert "点击窗口 X" not in message
+        assert "Mastercam NC 默认文件夹" not in message
         assert kwargs["parent"] is window
         assert settings["release_notes_seen_version"] == main_module.__version__
         assert saved
@@ -107,8 +110,10 @@ def test_mastercam_button_installs_only_after_user_enables_the_setting(monkeypat
     installed: list[bool] = []
 
     class InfoDialog:
+        created: list[bool] = []
+
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+            self.created.append(True)
         def exec(self) -> int:
             return 0
 
@@ -133,11 +138,57 @@ def test_mastercam_button_installs_only_after_user_enables_the_setting(monkeypat
 
     window = main_module.MainWindow()
     try:
+        InfoDialog.created.clear()
         window.install_mastercam_addin_if_enabled()
         window.install_mastercam_addin_if_enabled()
 
         assert len(installed) == 1
+        assert InfoDialog.created == []
         assert settings["mastercam_addin_installed_version"] == main_module.__version__
+    finally:
+        window.tray_icon.hide()
+        window.close()
+    assert app is not None
+
+
+def test_mastercam_install_success_popup_can_be_enabled_in_settings(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    settings: dict[str, object] = {
+        "install_mastercam_button": True,
+        "show_mastercam_install_success": True,
+    }
+    dialogs: list[str] = []
+
+    class InfoDialog:
+        def __init__(self, title: str, *_args: object, **_kwargs: object) -> None:
+            dialogs.append(title)
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(main_module, "load_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "save_settings", lambda _current: None)
+    monkeypatch.setattr(
+        main_module,
+        "default_user_template",
+        lambda: Path("assets/CNC程序单.xlsx").resolve(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "install_mastercam_addin",
+        lambda: SimpleNamespace(installed_years=(2024,)),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "resource_path",
+        lambda *_parts: Path("assets/mastercam_addin/GenerateProgramSheet.csx").resolve(),
+    )
+    monkeypatch.setattr(main_module, "ApplicationDialog", InfoDialog)
+
+    window = main_module.MainWindow()
+    try:
+        window.install_mastercam_addin_if_enabled()
+        assert dialogs == ["Mastercam 按钮安装完成"]
     finally:
         window.tray_icon.hide()
         window.close()

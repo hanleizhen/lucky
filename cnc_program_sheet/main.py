@@ -2161,11 +2161,15 @@ class SettingsDialog(QDialog):
         install_mastercam_button: bool = False,
         mastercam_nc_folder: str = "",
         exit_on_window_close: bool = False,
+        mastercam_sequence_search_enabled: bool = True,
+        mastercam_sequence_search_count: int = 11,
+        show_mastercam_install_success: bool = False,
+        print_quality: str = "high",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(600, 465)
+        self.resize(640, 540)
         self.repository = QLineEdit(current_repository)
         self.repository.setPlaceholderText("owner/repository")
         self.save_reminder = QCheckBox("保存完成后显示提醒")
@@ -2191,6 +2195,17 @@ class SettingsDialog(QDialog):
         self.mastercam_nc_folder.setToolTip("Mastercam 程序单按钮打开的 NC 文件夹；留空时根据 Mastercam 版本自动查找。")
         browse_mastercam_folder = QPushButton("浏览…")
         browse_mastercam_folder.clicked.connect(self._browse_mastercam_nc_folder)
+        self.mastercam_sequence_search_enabled = QCheckBox("启用按程序名查找连续 NC 程序组")
+        self.mastercam_sequence_search_enabled.setChecked(mastercam_sequence_search_enabled)
+        self.mastercam_sequence_search_count = QSpinBox()
+        self.mastercam_sequence_search_count.setRange(1, 100)
+        self.mastercam_sequence_search_count.setValue(max(1, min(100, mastercam_sequence_search_count)))
+        self.mastercam_sequence_search_count.setEnabled(mastercam_sequence_search_enabled)
+        self.mastercam_sequence_search_enabled.toggled.connect(
+            self.mastercam_sequence_search_count.setEnabled
+        )
+        self.show_mastercam_install_success = QCheckBox("Mastercam 按钮安装成功后显示弹窗提醒")
+        self.show_mastercam_install_success.setChecked(show_mastercam_install_success)
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -2216,6 +2231,16 @@ class SettingsDialog(QDialog):
         mastercam_folder_note = QLabel("设置后，Mastercam 按钮每次优先从这个文件夹选择 NC 文件；清空后恢复按版本自动查找。")
         mastercam_folder_note.setWordWrap(True)
         general_layout.addWidget(mastercam_folder_note)
+        sequence_count_row = QHBoxLayout()
+        sequence_count_row.addWidget(self.mastercam_sequence_search_enabled)
+        sequence_count_row.addStretch(1)
+        sequence_count_row.addWidget(QLabel("默认连续数量："))
+        sequence_count_row.addWidget(self.mastercam_sequence_search_count)
+        general_layout.addLayout(sequence_count_row)
+        sequence_note = QLabel("启用后可输入 500.NC 并按序号查找 500.NC 至 510.NC；只匹配相同前缀，BT500.NC 等不同名称不会混入。数量可在此调整，也可改用手动多选。")
+        sequence_note.setWordWrap(True)
+        general_layout.addWidget(sequence_note)
+        general_layout.addWidget(self.show_mastercam_install_success)
         general_layout.addStretch(1)
         tabs.addTab(general, "常规")
 
@@ -2320,8 +2345,15 @@ class SettingsDialog(QDialog):
         self.print_margin_mm.setRange(0, 30)
         self.print_margin_mm.setSuffix(" mm")
         self.print_margin_mm.setValue(max(0, min(30, print_margin_mm)))
+        self.print_quality = QComboBox()
+        self.print_quality.addItem("标准（较快）", "standard")
+        self.print_quality.addItem("高清（默认）", "high")
+        self.print_quality.addItem("最高（更占内存）", "maximum")
+        quality_index = self.print_quality.findData(print_quality)
+        self.print_quality.setCurrentIndex(quality_index if quality_index >= 0 else 1)
         print_form.addRow("默认方向：", self.print_orientation)
         print_form.addRow("页面边距：", self.print_margin_mm)
+        print_form.addRow("打印清晰度：", self.print_quality)
         print_note = QLabel("打印区域、方向与边距会自动记住。可在打印预览底部点击“打印区域”回到主表格框选，也可右键设为打印区域。")
         print_note.setWordWrap(True)
         print_form.addRow(print_note)
@@ -3089,12 +3121,17 @@ class MainWindow(QMainWindow):
         self.settings[key] = __version__
         save_settings(self.settings)
         years = "、".join(str(year) for year in result.installed_years)
-        ApplicationDialog(
-            "Mastercam 按钮安装完成",
-            f"已安装到 Mastercam {years} 的用户加载项目录。请关闭并重新打开 Mastercam 后使用。",
-            kind="info",
-            parent=self,
-        ).exec()
+        if bool(self.settings.get("show_mastercam_install_success", False)):
+            ApplicationDialog(
+                "Mastercam 按钮安装完成",
+                f"已安装到 Mastercam {years} 的用户加载项目录。请关闭并重新打开 Mastercam 后使用。",
+                kind="info",
+                parent=self,
+            ).exec()
+        else:
+            self.statusBar().showMessage(
+                f"Mastercam {years} 按钮已安装。请重新启动 Mastercam 后使用。", 7000
+            )
 
     def load_template(self, path: Path) -> None:
         try:
@@ -3362,6 +3399,10 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             return 8
 
+    def _configured_print_render_scale(self) -> int:
+        quality = str(self.settings.get("print_quality", "high"))
+        return {"standard": 3, "high": 5, "maximum": 7}.get(quality, 5)
+
     def _save_print_preferences(self, orientation: QPageLayout.Orientation, margin_mm: int) -> None:
         self.settings["print_orientation"] = "landscape" if orientation == QPageLayout.Orientation.Landscape else "portrait"
         self.settings["print_margin_mm"] = max(0, min(30, int(margin_mm)))
@@ -3417,7 +3458,7 @@ class MainWindow(QMainWindow):
             # Five times the on-screen resolution gives clean fine grid lines
             # on ordinary office printers, while the cap avoids excessive RAM
             # use for a custom oversized template.
-            render_scale = 5
+            render_scale = self._configured_print_render_scale()
             max_pixels = 60_000_000
             while render_scale > 2 and source.width() * source.height() * render_scale * render_scale > max_pixels:
                 render_scale -= 1
@@ -4468,6 +4509,10 @@ class MainWindow(QMainWindow):
                     self.settings.get("close_window_behavior") == "exit",
                 )
             ),
+            bool(self.settings.get("mastercam_sequence_search_enabled", True)),
+            int(self.settings.get("mastercam_sequence_search_count", 11)),
+            bool(self.settings.get("show_mastercam_install_success", False)),
+            str(self.settings.get("print_quality", "high")),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -4490,6 +4535,10 @@ class MainWindow(QMainWindow):
             self.settings["selection_color"] = dialog.selected_selection_color()
             self.settings["appearance_mode"] = dialog.selected_appearance_mode()
             self.settings["window_color"] = dialog.selected_window_color()
+            self.settings["mastercam_sequence_search_enabled"] = dialog.mastercam_sequence_search_enabled.isChecked()
+            self.settings["mastercam_sequence_search_count"] = dialog.mastercam_sequence_search_count.value()
+            self.settings["show_mastercam_install_success"] = dialog.show_mastercam_install_success.isChecked()
+            self.settings["print_quality"] = str(dialog.print_quality.currentData())
             previous_mastercam_install = bool(self.settings.get("install_mastercam_button", False))
             self.settings["install_mastercam_button"] = dialog.install_mastercam_button.isChecked()
             mastercam_nc_folder = dialog.mastercam_nc_folder.text().strip()
@@ -4500,8 +4549,14 @@ class MainWindow(QMainWindow):
                 self.settings.pop("save_notice_version", None)
             save_settings(self.settings)
             try:
-                (user_data_dir() / "mastercam_nc_folder.txt").write_text(
-                    mastercam_nc_folder, encoding="utf-8"
+                data_dir = user_data_dir()
+                (data_dir / "mastercam_nc_folder.txt").write_text(mastercam_nc_folder, encoding="utf-8")
+                (data_dir / "mastercam_sequence_search_enabled.txt").write_text(
+                    "true" if self.settings["mastercam_sequence_search_enabled"] else "false",
+                    encoding="utf-8",
+                )
+                (data_dir / "mastercam_sequence_search_count.txt").write_text(
+                    str(self.settings["mastercam_sequence_search_count"]), encoding="utf-8"
                 )
             except OSError as exc:
                 self.show_error(

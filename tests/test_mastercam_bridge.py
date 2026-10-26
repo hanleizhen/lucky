@@ -90,6 +90,20 @@ def test_mastercam_bridge_prefers_saved_nc_folder_setting() -> None:
     )
 
 
+def test_mastercam_sequence_search_uses_exact_prefix_and_saved_group_size() -> None:
+    source = Path("mastercam_addin/GenerateProgramSheet.csx").read_text(encoding="utf-8")
+    packaged_source = Path("assets/mastercam_addin/GenerateProgramSheet.csx").read_text(encoding="utf-8")
+
+    assert "ReadSequenceSearchEnabled()" in source
+    assert '"mastercam_sequence_search_enabled.txt"' in source
+    assert '"mastercam_sequence_search_count.txt"' in source
+    assert 'Regex.Match(stem, @"^(.*?)(\\d+)$")' in source
+    assert 'Path.Combine(folder, prefix + number + extension)' in source
+    assert "FindSequentialProgramFiles" in source
+    assert "手动多选文件" in source
+    assert packaged_source == source
+
+
 def test_conversion_launch_preloads_nc_into_the_matching_conversion_window(tmp_path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "part.NC"
