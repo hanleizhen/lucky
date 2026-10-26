@@ -74,7 +74,11 @@ def discover_mastercam_addin_targets(
             year = int(match.group(1))
             if year not in SUPPORTED_MASTERCAM_YEARS:
                 continue
-            if not (installation / "Mastercam.exe").is_file():
+            executable_candidates = (
+                installation / "Mastercam.exe",
+                installation / "Mastercam" / "Mastercam.exe",
+            )
+            if not any(executable.is_file() for executable in executable_candidates):
                 continue
             profile = docs / f"My Mastercam {year}" / "Mastercam"
             if not profile.is_dir():

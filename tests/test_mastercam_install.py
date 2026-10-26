@@ -26,6 +26,20 @@ def test_discovery_finds_each_supported_year_and_ignores_others(tmp_path: Path) 
     assert all(path.name == "Add-Ins" for _, path in discovered)
 
 
+def test_discovery_accepts_mastercam_executable_in_nested_product_folder(tmp_path: Path) -> None:
+    docs = tmp_path / "Documents"
+    root = tmp_path / "Program Files"
+    installation = root / "Mastercam 2022" / "Mastercam"
+    installation.mkdir(parents=True)
+    (installation / "Mastercam.exe").write_bytes(b"mastercam")
+    profile = docs / "My Mastercam 2022" / "Mastercam"
+    profile.mkdir(parents=True)
+
+    discovered = mastercam_install.discover_mastercam_addin_targets(docs, (root,))
+
+    assert discovered == [(2022, profile / "Add-Ins")]
+
+
 def test_install_copies_verified_files_and_backs_up_existing_addin(tmp_path: Path, monkeypatch) -> None:
     docs = tmp_path / "Documents"
     root = tmp_path / "Program Files"
