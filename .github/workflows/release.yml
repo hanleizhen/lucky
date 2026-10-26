@@ -34,7 +34,7 @@ jobs:
         run: |
           $pythonDir = Split-Path (Get-Command python).Source
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$pythonDir"
-          python -m PyInstaller --noconfirm --clean cnc_program_sheet.spec
+          python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work cnc_program_sheet.spec
       - name: Verify packaged application self-check
         shell: pwsh
         run: |
