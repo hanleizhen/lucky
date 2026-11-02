@@ -30,13 +30,13 @@ def test_official_template_cell_mapping() -> None:
     assert LAYOUT.capacity == 19
 
 
-def test_output_never_reuses_existing_name(tmp_path: Path) -> None:
+def test_output_reuses_existing_name(tmp_path: Path) -> None:
     record = ProgramRecord(Path("O-1.NC"), "O-1.NC")
     first = output_filename([record], tmp_path)
     first.touch()
     second = output_filename([record], tmp_path)
     assert first.name == "CNC程序单_O-1.xlsx"
-    assert second.name == "CNC程序单_O-1_2.xlsx"
+    assert second == first
 
 
 def test_template_name_field_is_used_as_a_dated_output_filename(tmp_path: Path) -> None:
@@ -46,7 +46,7 @@ def test_template_name_field_is_used_as_a_dated_output_filename(tmp_path: Path) 
     second = output_filename([record], tmp_path, document_name="3011-B 模具.xlsx", generated_on=date(2026, 10, 9))
 
     assert first.name == "3011-B 模具_2026-10-09.xlsx"
-    assert second.name == "3011-B 模具_2026-10-09_2.xlsx"
+    assert second == first
 
 
 def test_cleared_program_cells_covers_the_full_import_area() -> None:

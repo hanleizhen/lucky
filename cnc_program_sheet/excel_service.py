@@ -216,11 +216,13 @@ def output_filename(
     document_name: str = "",
     generated_on: date | None = None,
 ) -> Path:
-    """Return a unique output name without ever reusing an existing workbook.
+    """Return the stable output name for this program-sheet identity.
 
     A value entered in the template's J1 name field takes precedence and is
     followed by the generation date.  Leaving that field blank retains the
-    original convenient NC-program based filename behaviour.
+    original convenient NC-program based filename behaviour. Repeated saves
+    intentionally resolve to the same path so the latest sheet replaces the
+    previous one.
     """
 
     requested_name = document_name.strip()
@@ -238,12 +240,7 @@ def output_filename(
             base_name = "CNC程序单_" + "_".join(stems)
         else:
             base_name = f"CNC程序单_{today.isoformat()}"
-    target = desktop / f"{base_name}.xlsx"
-    number = 2
-    while target.exists():
-        target = desktop / f"{base_name}_{number}.xlsx"
-        number += 1
-    return target
+    return desktop / f"{base_name}.xlsx"
 
 
 def export_workbook(
@@ -254,14 +251,21 @@ def export_workbook(
     red_text_cells: Sequence[str] = (),
     red_fill_cells: Sequence[str] = (),
 ) -> None:
-    """Create a new workbook. The source template is opened read-only in spirit and never saved."""
+    """Write a workbook, atomically replacing an existing output if needed.
+
+    The source template is never saved or replaced. The completed workbook is
+    first written beside the destination, then moved over it so an interrupted
+    save does not leave a partially written program sheet.
+    """
 
     verify_template(template_path)
+    source_template = Path(template_path)
     target = Path(target_path)
-    if target.exists():
-        raise TemplateError(f"为保护已有文件，拒绝覆盖：{target}")
+    if target.resolve() == source_template.resolve():
+        raise TemplateError(f"不能用导出的程序单覆盖原始模板：{target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    workbook = load_workbook(template_path, read_only=False, data_only=False, keep_links=True)
+    temporary_target = target.with_name(f".{target.stem}.saving-{uuid4().hex}{target.suffix}")
+    workbook = load_workbook(source_template, read_only=False, data_only=False, keep_links=True)
     try:
         sheet = workbook[LAYOUT.sheet_name]
         for cell, value in cell_values.items():
@@ -309,13 +313,15 @@ def export_workbook(
                 ),
             )
             sheet.add_image(image)
-        workbook.save(target)
+        workbook.save(temporary_target)
+        workbook.close()
+        temporary_target.replace(target)
     except Exception:
-        # A failed save does not touch the source template.  The caller always
-        # creates a fresh unique output path, so an incomplete target can be
-        # safely removed without ever deleting an existing user file.
-        if target.exists():
-            target.unlink()
+        if temporary_target.exists():
+            try:
+                temporary_target.unlink()
+            except OSError:
+                pass
         raise
     finally:
         workbook.close()

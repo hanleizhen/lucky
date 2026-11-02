@@ -2165,6 +2165,7 @@ class SettingsDialog(QDialog):
         mastercam_sequence_search_count: int = 11,
         show_mastercam_install_success: bool = False,
         print_quality: str = "high",
+        confirm_before_overwrite: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2182,6 +2183,8 @@ class SettingsDialog(QDialog):
         self.confirm_before_clear.setChecked(confirm_before_clear)
         self.confirm_before_save = QCheckBox("保存程序单前显示确认窗口")
         self.confirm_before_save.setChecked(confirm_before_save)
+        self.confirm_before_overwrite = QCheckBox("覆盖同名程序单前询问")
+        self.confirm_before_overwrite.setChecked(confirm_before_overwrite)
         self.open_folder_after_save = QCheckBox("保存完成后打开所在文件夹")
         self.open_folder_after_save.setChecked(open_folder_after_save)
         self.exit_on_window_close = QCheckBox(
@@ -2286,6 +2289,10 @@ class SettingsDialog(QDialog):
         editing_layout = QVBoxLayout(editing)
         editing_layout.addWidget(self.confirm_before_clear)
         editing_layout.addWidget(self.confirm_before_save)
+        editing_layout.addWidget(self.confirm_before_overwrite)
+        overwrite_note = QLabel("关闭后，同名程序单再次保存时将直接覆盖原文件。")
+        overwrite_note.setWordWrap(True)
+        editing_layout.addWidget(overwrite_note)
         self.selection_color = QLineEdit(self._normalized_selection_color(selection_color))
         self.selection_color.setMaxLength(7)
         self.selection_color.setPlaceholderText("#B7D7FF")
@@ -4513,6 +4520,7 @@ class MainWindow(QMainWindow):
             int(self.settings.get("mastercam_sequence_search_count", 11)),
             bool(self.settings.get("show_mastercam_install_success", False)),
             str(self.settings.get("print_quality", "high")),
+            confirm_before_overwrite=bool(self.settings.get("confirm_before_overwrite", True)),
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -4523,6 +4531,7 @@ class MainWindow(QMainWindow):
             self.settings["automatic_update_check"] = dialog.automatic_update_check.isChecked()
             self.settings["confirm_before_clear"] = dialog.confirm_before_clear.isChecked()
             self.settings["confirm_before_save"] = dialog.confirm_before_save.isChecked()
+            self.settings["confirm_before_overwrite"] = dialog.confirm_before_overwrite.isChecked()
             self.settings["open_folder_after_save"] = dialog.open_folder_after_save.isChecked()
             self.settings["exit_on_window_close"] = dialog.exit_on_window_close.isChecked()
             # The explicit setting supersedes the older one-time X-button choice.
@@ -4756,7 +4765,18 @@ class MainWindow(QMainWindow):
                 output_directory,
                 document_name=self.manual_cells.get(LAYOUT.output_name_cell, ""),
             )
-            if self.settings.get("confirm_before_save", False):
+            if target.exists() and self.settings.get("confirm_before_overwrite", True):
+                dialog = ApplicationDialog(
+                    "确认覆盖程序单",
+                    f"同名程序单已经存在：\n{target}\n\n要用本次内容覆盖上一次保存的文件吗？",
+                    kind="warning",
+                    buttons=(("取消", "cancel"), ("覆盖保存", "overwrite")),
+                    parent=self,
+                )
+                dialog.exec()
+                if dialog.choice != "overwrite":
+                    return
+            elif self.settings.get("confirm_before_save", False):
                 dialog = ApplicationDialog(
                     "确认保存",
                     f"确认将程序单保存到：\n{target}？",

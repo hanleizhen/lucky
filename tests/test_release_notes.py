@@ -45,7 +45,7 @@ def test_release_notes_are_shown_once_per_installed_version(monkeypatch) -> None
         assert f"v{main_module.__version__}" in title
         assert "本次更新内容" in message
         assert "只会在首次打开本版本时显示一次" in message
-        assert "打印清晰度" in message
+        assert "同名程序单重复保存时覆盖上次文件" in message
         assert "点击窗口 X" not in message
         assert "Mastercam NC 默认文件夹" not in message
         assert kwargs["parent"] is window

@@ -63,7 +63,7 @@ jobs:
           @{
             version = $version
             installer_name = $installerName
-            notes = "新增：Mastercam 连续 NC 程序组搜索、可调打印清晰度及 Mastercam 安装成功提醒设置。"
+            notes = "优化：同名程序单重复保存时覆盖上次文件，并可在设置中关闭覆盖确认提示。"
           } | ConvertTo-Json -Compress | Set-Content build/installer/CNCProgramSheet_update.json -NoNewline -Encoding utf8
           "path=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload build artifact
