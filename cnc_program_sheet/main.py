@@ -2143,6 +2143,8 @@ class ExcelPreview(QTableWidget):
 class SettingsDialog(QDialog):
     """The single, familiar settings entry point for normal users."""
 
+    mastercam_install_requested = Signal()
+
     def __init__(
         self,
         current_repository: str,
@@ -2193,6 +2195,9 @@ class SettingsDialog(QDialog):
         self.exit_on_window_close.setChecked(exit_on_window_close)
         self.install_mastercam_button = QCheckBox("启动时自动安装或更新 Mastercam 按钮（支持 2021–2027）")
         self.install_mastercam_button.setChecked(install_mastercam_button)
+        self.install_mastercam_now = QPushButton("立即安装／修复 Mastercam 按钮")
+        self.install_mastercam_now.setToolTip("重新安装 Mastercam 后，可在这里立即恢复程序单按钮，无需重启本软件。")
+        self.install_mastercam_now.clicked.connect(self.mastercam_install_requested.emit)
         self.mastercam_nc_folder = QLineEdit(mastercam_nc_folder)
         self.mastercam_nc_folder.setPlaceholderText("留空时按 Mastercam 版本自动查找 NC 文件夹")
         self.mastercam_nc_folder.setToolTip("Mastercam 程序单按钮打开的 NC 文件夹；留空时根据 Mastercam 版本自动查找。")
@@ -2223,7 +2228,8 @@ class SettingsDialog(QDialog):
         general_layout.addWidget(self.open_folder_after_save)
         general_layout.addWidget(self.exit_on_window_close)
         general_layout.addWidget(self.install_mastercam_button)
-        mastercam_note = QLabel("勾选后保存设置并重新启动软件，即会自动检测并安装按钮。取消勾选只会停止后续自动安装，不会删除已安装的按钮。")
+        general_layout.addWidget(self.install_mastercam_now, 0, Qt.AlignmentFlag.AlignLeft)
+        mastercam_note = QLabel("重装 Mastercam 后点击“立即安装／修复”，成功后重新启动 Mastercam 即可看到按钮。勾选自动安装则会在本软件更新后安装；取消勾选不会删除已安装的按钮。")
         mastercam_note.setWordWrap(True)
         general_layout.addWidget(mastercam_note)
         general_layout.addWidget(QLabel("Mastercam NC 默认文件夹："))
@@ -3105,40 +3111,63 @@ class MainWindow(QMainWindow):
         if str(self.settings.get(key, "")) == __version__:
             return
 
+        self.install_mastercam_addin_now(manual=False)
+
+    def install_mastercam_addin_now(
+        self, *, manual: bool = True, parent: QWidget | None = None,
+    ) -> bool:
+        """Install immediately, even if this app version installed it before.
+
+        A Mastercam reinstall can remove the add-in without changing our app
+        version, so the settings action must bypass the startup version cache.
+        """
+
+        dialog_parent = parent or self
+        if not resource_path("assets", "mastercam_addin", "GenerateProgramSheet.csx").is_file():
+            if manual:
+                ApplicationDialog(
+                    "无法安装 Mastercam 按钮",
+                    "当前软件安装包缺少 Mastercam 按钮文件。请重新安装完整的软件安装包。",
+                    kind="error",
+                    parent=dialog_parent,
+                ).exec()
+            return False
+
         try:
             result = install_mastercam_addin()
         except MastercamInstallError as exc:
             self.statusBar().showMessage(f"Mastercam 按钮未安装：{exc}", 10000)
             ApplicationDialog(
                 "未能安装 Mastercam 按钮",
-                f"{exc}\n\n设置仍保持启用。安装或修复 Mastercam 后，重新启动本软件即可重试。",
+                f"{exc}\n\n请确认 Mastercam 已安装在标准位置，然后回到设置中点击“立即安装／修复”。",
                 kind="warning",
-                parent=self,
+                parent=dialog_parent,
             ).exec()
-            return
+            return False
         except OSError as exc:
             ApplicationDialog(
                 "安装 Mastercam 按钮失败",
-                f"写入 Mastercam 加载项目录失败：{exc}\n\n请检查目录权限后重新启动本软件重试。",
+                f"写入 Mastercam 加载项目录失败：{exc}\n\n请检查目录权限后重试。",
                 kind="error",
-                parent=self,
+                parent=dialog_parent,
             ).exec()
-            return
+            return False
 
-        self.settings[key] = __version__
+        self.settings["mastercam_addin_installed_version"] = __version__
         save_settings(self.settings)
         years = "、".join(str(year) for year in result.installed_years)
-        if bool(self.settings.get("show_mastercam_install_success", False)):
+        if manual or bool(self.settings.get("show_mastercam_install_success", False)):
             ApplicationDialog(
                 "Mastercam 按钮安装完成",
                 f"已安装到 Mastercam {years} 的用户加载项目录。请关闭并重新打开 Mastercam 后使用。",
                 kind="info",
-                parent=self,
+                parent=dialog_parent,
             ).exec()
         else:
             self.statusBar().showMessage(
                 f"Mastercam {years} 按钮已安装。请重新启动 Mastercam 后使用。", 7000
             )
+        return True
 
     def load_template(self, path: Path) -> None:
         try:
@@ -4522,6 +4551,9 @@ class MainWindow(QMainWindow):
             str(self.settings.get("print_quality", "high")),
             confirm_before_overwrite=bool(self.settings.get("confirm_before_overwrite", True)),
             parent=self,
+        )
+        dialog.mastercam_install_requested.connect(
+            lambda: self.install_mastercam_addin_now(parent=dialog)
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings["update_repository"] = dialog.repository.text().strip()

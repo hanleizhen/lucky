@@ -54,10 +54,10 @@ def discover_mastercam_addin_targets(
 ) -> list[tuple[int, Path]]:
     """Find standard Mastercam 2021–2027 installs and their user Add-Ins dirs.
 
-    Detection is deliberately based on both the installed executable and the
-    matching ``My Mastercam YYYY`` profile. This avoids creating an Add-Ins
-    tree for a stale profile left behind by an uninstalled Mastercam version.
-    Both values are injectable so detection stays testable on non-Windows CI.
+    An installed executable is required. A newly reinstalled Mastercam may
+    not have created its user profile yet, so installation can create the
+    standard ``My Mastercam YYYY/Mastercam/Add-Ins`` directory when needed.
+    The paths are injectable for tests outside Windows.
     """
 
     documents_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
@@ -81,8 +81,6 @@ def discover_mastercam_addin_targets(
             if not any(executable.is_file() for executable in executable_candidates):
                 continue
             profile = docs / f"My Mastercam {year}" / "Mastercam"
-            if not profile.is_dir():
-                continue
             found[year] = profile / "Add-Ins"
     return sorted(found.items())
 
@@ -119,7 +117,7 @@ def install_mastercam_addin(
     targets = discover_mastercam_addin_targets(documents_dir, program_roots)
     if not targets:
         raise MastercamInstallError(
-            "未检测到已安装的 Mastercam 2021–2027，或找不到对应的 My Mastercam 用户配置目录。"
+            "未检测到标准安装位置中的 Mastercam 2021–2027。"
         )
 
     source_dir = resource_path("assets", "mastercam_addin")

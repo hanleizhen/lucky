@@ -1,6 +1,6 @@
 """Single source of truth for the application version."""
 
-__version__ = "1.1.60"
+__version__ = "1.1.61"
 APP_NAME = "CNC 智能程序单"
 APP_ICON_FILE = "cnc_smart_sheet_icon.ico"
 # Keep this identifier stable across releases.  Windows uses it to associate
@@ -12,6 +12,6 @@ APP_USER_MODEL_ID = "CNCProgramSheet.CNCSmartSheet"
 # their network is unavailable immediately after an update.  Update this list
 # whenever ``__version__`` changes.
 RELEASE_NOTES: tuple[str, ...] = (
-    "优化：同名程序单重复保存时覆盖上次文件，并可在设置中关闭覆盖确认提示。",
+    "新增：设置中可立即安装或修复 Mastercam 按钮，重装 Mastercam 后无需重启本软件。",
 )
 
